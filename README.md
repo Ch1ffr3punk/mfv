@@ -37,7 +37,7 @@ server's .well-known/mfv/ directory using cURL:
 $ curl -O https://example.org/.well-known/mfv/merkle_metadata.json   
 $ curl -O https://example.org/.well-known/mfv/merkle_metadata.json.ots     
 $ curl -O https://example.org/.well-known/mfv/dns.txt      
-$ curl -O https://example.org/.well-known/mfv/dns.txt.ots
+$ curl -O https://example.org/.well-known/mfv/dns.txt.ots  
 $ dig _merkle.example.org TXT +short
 
 First, verify the timestamp at opentimestamps.org to confirm the data  
