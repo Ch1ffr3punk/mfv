@@ -33,7 +33,7 @@ type Metadata struct {
 	Files         []FileInfo `json:"files"`
 	Algorithm     string     `json:"algorithm"`
 	Version       string     `json:"version"`
-	ExcludedPaths []string   `json:"excluded_paths,omitempty"` // NEU: Optionales Feld für Ausschlüsse
+	ExcludedPaths []string   `json:"excluded_paths,omitempty"`
 }
 
 // ChangeResult stores detected changes
@@ -58,24 +58,33 @@ type DNSRecord struct {
 
 // VerificationResult stores complete verification results
 type VerificationResult struct {
-	ServerURL        string       `json:"server_url"`
-	Domain           string       `json:"domain"`
-	VerificationDate time.Time    `json:"verification_date"`
-	OriginalMetadata *Metadata    `json:"original_metadata"`
-	CurrentFiles     []FileInfo   `json:"current_files"`
+	ServerURL        string        `json:"server_url"`
+	Domain           string        `json:"domain"`
+	VerificationDate time.Time     `json:"verification_date"`
+	OriginalMetadata *Metadata     `json:"original_metadata"`
+	CurrentFiles     []FileInfo    `json:"current_files"`
 	Changes          *ChangeResult `json:"changes"`
-	CalculatedRoot   string       `json:"calculated_root"`
-	DNSRecord        *DNSRecord   `json:"dns_record,omitempty"`
-	DNSMatch         bool         `json:"dns_match,omitempty"`
-	RootMatch        bool         `json:"root_match"`
-	Success          bool         `json:"success"`
-	ErrorMessage     string       `json:"error_message,omitempty"`
-	ExcludedInfo     string       `json:"excluded_info,omitempty"` // NEU: Info über Ausschlüsse
+	CalculatedRoot   string        `json:"calculated_root"`
+	DNSRecord        *DNSRecord    `json:"dns_record,omitempty"`
+	DNSMatch         bool          `json:"dns_match,omitempty"`
+	RootMatch        bool          `json:"root_match"`
+	Success          bool          `json:"success"`
+	ErrorMessage     string        `json:"error_message,omitempty"`
+	ExcludedInfo     string        `json:"excluded_info,omitempty"`
+}
+
+// DownloadResult stores download operation results
+type DownloadResult struct {
+	Success       bool      `json:"success"`
+	Timestamp     time.Time `json:"timestamp"`
+	Files         []string  `json:"files"`
+	TotalSize     int64     `json:"total_size"`
+	ErrorMessages []string  `json:"error_messages,omitempty"`
 }
 
 // Constants
 const (
-	Version   = "0.2.0"  // Version erhöht für Kompatibilität
+	Version   = "0.3.0"
 	Algorithm = "RIPEMD-160"
 )
 
@@ -96,12 +105,130 @@ func calculateRIPEMD160(data []byte) string {
 	return fmt.Sprintf("%x", hasher.Sum(nil))
 }
 
+// Download file from URL and save to local path
+func downloadFile(url string, filepath string) error {
+	// Create the file
+	out, err := os.Create(filepath)
+	if err != nil {
+		return fmt.Errorf("failed to create file %s: %v", filepath, err)
+	}
+	defer out.Close()
+
+	// Get the data
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to download %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+
+	// Check server response
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad status: %s for %s", resp.Status, url)
+	}
+
+	// Write the body to file
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to write file %s: %v", filepath, err)
+	}
+
+	return nil
+}
+
+// Download proof files from server
+func downloadProofs(serverURL string) *DownloadResult {
+	result := &DownloadResult{
+		Success:       false,
+		Timestamp:     time.Now().UTC(),
+		Files:         []string{},
+		ErrorMessages: []string{},
+	}
+
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Println("DOWNLOADING PROOF FILES")
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Printf("Server URL: %s\n", serverURL)
+	fmt.Println()
+
+	// Define the files to download with their local names
+	filesToDownload := []struct {
+		remotePath string
+		localName  string
+	}{
+		{".well-known/mfv/merkle_metadata.json", "merkle_metadata.json"},
+		{".well-known/mfv/merkle_metadata.json.ots", "merkle_metadata.json.ots"},
+		{".well-known/mfv/dns.txt", "dns.txt"},
+		{".well-known/mfv/dns.txt.ots", "dns.txt.ots"},
+		{".well-known/merkle-metadata.json", "merkle_metadata.json"},
+		{".well-known/merkle-metadata.json.ots", "merkle_metadata.json.ots"},
+		{".well-known/dns.txt", "dns.txt"},
+		{".well-known/dns.txt.ots", "dns.txt.ots"},
+	}
+
+	successCount := 0
+	var totalSize int64
+
+	for _, file := range filesToDownload {
+		// Skip if we already have this file
+		alreadyDownloaded := false
+		for _, downloaded := range result.Files {
+			if downloaded == file.localName {
+				alreadyDownloaded = true
+				break
+			}
+		}
+		if alreadyDownloaded {
+			continue
+		}
+
+		url := fmt.Sprintf("%s/%s", strings.TrimSuffix(serverURL, "/"), file.remotePath)
+		
+		fmt.Printf("Trying: %s\n", url)
+
+		// Try to download
+		if err := downloadFile(url, file.localName); err == nil {
+			// Get file size
+			if info, err := os.Stat(file.localName); err == nil {
+				totalSize += info.Size()
+			}
+
+			result.Files = append(result.Files, file.localName)
+			successCount++
+			fmt.Printf("  ✓ Downloaded: %s\n", file.localName)
+		} else {
+			fmt.Printf("  ✗ Failed: %v\n", err)
+		}
+	}
+
+	// Check what we got
+	result.TotalSize = totalSize
+	result.Success = successCount > 0
+
+	fmt.Println(strings.Repeat("-", 70))
+	fmt.Printf("Download Summary:\n")
+	fmt.Printf("  Successfully downloaded: %d files\n", successCount)
+	fmt.Printf("  Total size: %s\n", formatBytes(totalSize))
+	
+	if len(result.Files) > 0 {
+		fmt.Printf("  Files saved to current directory:\n")
+		for _, file := range result.Files {
+			fmt.Printf("    - %s\n", file)
+		}
+	} else {
+		fmt.Printf("  No files were downloaded. Please check the server configuration.\n")
+		fmt.Printf("  Expected files in: .well-known/mfv/ or .well-known/\n")
+	}
+
+	fmt.Println(strings.Repeat("=", 70))
+	return result
+}
+
 // Fetch metadata from server
 func fetchMetadata(serverURL string) (*Metadata, error) {
 	possiblePaths := []string{
 		".well-known/mfv/merkle_metadata.json",
 		".well-known/merkle-metadata.json",
-		"merkle_metadata.json", // Direkter Zugriff als Fallback
+		"merkle_metadata.json",
 	}
 
 	var lastError error
@@ -127,7 +254,7 @@ func fetchMetadata(serverURL string) (*Metadata, error) {
 	return nil, fmt.Errorf("metadata not found. Last error: %v", lastError)
 }
 
-// Collect all files from remote server (ignoriert ausgeschlossene Pfade)
+// Collect all files from remote server
 func collectRemoteFiles(serverURL string, metadata *Metadata) ([]FileInfo, int64, error) {
 	var files []FileInfo
 	var totalSize int64
@@ -137,14 +264,12 @@ func collectRemoteFiles(serverURL string, metadata *Metadata) ([]FileInfo, int64
 		
 		resp, err := http.Get(fileURL)
 		if err != nil {
-			// Optional: Könnte ausgeschlossen sein, aber wir versuchen es trotzdem
 			fmt.Printf("Warning: Could not fetch %s: %v\n", fileInfo.Path, err)
 			continue
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			// File might have been deleted or is excluded
 			fmt.Printf("Warning: File %s returned status %d\n", fileInfo.Path, resp.StatusCode)
 			continue
 		}
@@ -286,7 +411,7 @@ func compareFiles(original, current []FileInfo) *ChangeResult {
 	return result
 }
 
-// Query DNS for Merkle hash (erweitert für Excluded-Paths)
+// Query DNS for Merkle hash
 func queryDNSHash(domain string) (*DNSRecord, error) {
 	attempts := []string{
 		domain,
@@ -455,7 +580,7 @@ func displayResults(result *VerificationResult) {
 			}
 		} else {
 			fmt.Printf("    (e.g., %s, ...)\n", 
-				strings.Join(result.OriginalMetadata.ExcludedPaths[:3], ", "))
+				strings.Join(result.OriginalMetadata.ExcludedPaths[:min(3, len(result.OriginalMetadata.ExcludedPaths))], ", "))
 		}
 	}
 	
@@ -689,24 +814,27 @@ func main() {
 		fmt.Println("Algorithm:", Algorithm)
 		fmt.Println()
 		fmt.Println("Usage:")
-		fmt.Println("  mfvc <server-url> [--dns] [--save]")
+		fmt.Println("  mfvc <server-url> [--dns] [--save] [--download]")
 		fmt.Println()
 		fmt.Println("Arguments:")
 		fmt.Println("  <server-url>    URL of the server to verify")
 		fmt.Println("  --dns           Also verify against DNS TXT records")
 		fmt.Println("  --save          Save detailed JSON report")
+		fmt.Println("  --download      Download proof files (.well-known/mfv/*)")
 		fmt.Println()
 		fmt.Println("Examples:")
 		fmt.Println("  mfvc https://example.com")
 		fmt.Println("  mfvc https://example.com --dns")
 		fmt.Println("  mfvc https://example.com --dns --save")
-		fmt.Println("  mfvc http://192.168.1.100:8080")
+		fmt.Println("  mfvc https://example.com --download")
+		fmt.Println("  mfvc http://192.168.1.100:8080 --download")
 		os.Exit(1)
 	}
 
 	serverURL := os.Args[1]
 	useDNS := false
 	saveReport := false
+	downloadProofsFlag := false
 
 	for _, arg := range os.Args[2:] {
 		switch arg {
@@ -714,6 +842,8 @@ func main() {
 			useDNS = true
 		case "--save":
 			saveReport = true
+		case "--download":
+			downloadProofsFlag = true
 		default:
 			fmt.Printf("Warning: Unknown argument: %s\n", arg)
 		}
@@ -723,6 +853,31 @@ func main() {
 		serverURL = "https://" + serverURL
 	}
 
+	// Handle download mode
+	if downloadProofsFlag {
+		downloadProofs(serverURL)
+		// Even in download mode, we can still do verification
+		if useDNS || saveReport {
+			fmt.Println("\n" + strings.Repeat("=", 70))
+			fmt.Println("CONTINUING WITH VERIFICATION AFTER DOWNLOAD")
+			fmt.Println(strings.Repeat("=", 70))
+			result := verifyRemote(serverURL, useDNS)
+			displayResults(result)
+
+			if saveReport && result.Success {
+				if err := saveVerificationResult(result); err != nil {
+					fmt.Printf("Warning: Could not save report: %v\n", err)
+				}
+			}
+
+			if !result.Success {
+				os.Exit(1)
+			}
+		}
+		return
+	}
+
+	// Normal verification mode
 	result := verifyRemote(serverURL, useDNS)
 	displayResults(result)
 
