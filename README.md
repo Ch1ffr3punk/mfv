@@ -31,14 +31,8 @@ _merkle.example.org IN TXT "merkle-root=9f327e3d7c3c2d1a4b5c6d7e8f9a0b1c2d3e4f5a
 
 ## For End Users (Verification Side)
 
-To perform complete integrity verification, download the four files from the  
-server's .well-known/mfv/ directory using cURL:   
-
-$ curl -O https://example.org/.well-known/mfv/merkle_metadata.json   
-$ curl -O https://example.org/.well-known/mfv/merkle_metadata.json.ots     
-$ curl -O https://example.org/.well-known/mfv/dns.txt      
-$ curl -O https://example.org/.well-known/mfv/dns.txt.ots  
-$ dig _merkle.example.org TXT +short
+To perform complete integrity verification, download the four files from the   
+server's .well-known/mfv/ directory with the --download parameter.    
 
 First, verify the timestamp at opentimestamps.org to confirm the data  
 hasn't been backdated. Then use mfvc https://example.org to verify all  
