@@ -4,7 +4,7 @@ published a web page, in combination with opentimestamps.org
 
 ## For Administrators (Server Side)
 
-As an administrator, deploy the integrity verification System  
+As an administrator, deploy the integrity verification system  
 by placing four critical files in your .well-known/mfv/ directory:  
 
 1) merkle_metadata.json (generated via mfv hash /path/to/your/webroot)  
@@ -108,6 +108,28 @@ UNCHANGED FILES: 8 files (included)
   - redball.gif
   - about.html
 ======================================================================
+
+opentimestamps.org proof:
+
+merkle_metadata.json.ots 479 B
+Stamped SHA256 hash: c7e2a9b7c17e1466e53734c8f5089657bebaf7082e73c995b2ab1cf2f0b0c925
+
+merkle_metadata.json 2.0 kB
+SHA256: c7e2a9b7c17e1466e53734c8f5089657bebaf7082e73c995b2ab1cf2f0b0c925
+
+SUCCESS!
+
+Bitcoin block 926445 attests existence as of 2025-12-04 CET
+
+dns.txt.ots 514 B
+Stamped SHA256 hash: a115060e1295b1eb5592487ad74db801b7737610c263b4e271217b82b8bd7b27
+
+dns.txt 81 B
+SHA256: a115060e1295b1eb5592487ad74db801b7737610c263b4e271217b82b8bd7b27
+
+SUCCESS!
+
+Bitcoin block 926445 attests existence as of 2025-12-04 CET
 ```
 
 If you like mfv consider a small donation in crypto currencies
