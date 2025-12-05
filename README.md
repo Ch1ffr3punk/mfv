@@ -108,9 +108,9 @@ UNCHANGED FILES: 8 files (included)
   - redball.gif
   - about.html
 ======================================================================
-
-opentimestamps.org proof:
-
+```
+## opentimestamps.org proof:
+```
 merkle_metadata.json.ots 479 B
 Stamped SHA256 hash: c7e2a9b7c17e1466e53734c8f5089657bebaf7082e73c995b2ab1cf2f0b0c925
 
