@@ -517,7 +517,7 @@ func extractDomain(url string) string {
 // Format time to UTC with Unix timestamp
 func formatTimeUTC(t time.Time) string {
 	utcTime := t.UTC()
-	return fmt.Sprintf("%s (Unix: %d)", 
+	return fmt.Sprintf("%s (Unix ET: %d)", 
 		utcTime.Format("2006-01-02 15:04:05 MST"), 
 		utcTime.Unix())
 }
