@@ -89,7 +89,7 @@ var defaultConfig = Config{
 
 // Constants
 const (
-	Version      = "1.0.0"
+	Version      = "0.4.0"
 	Algorithm    = "RIPEMD-160"
 	MetadataFile = "merkle_metadata.json"
 	ConfigFile   = "merkle_config.json"
