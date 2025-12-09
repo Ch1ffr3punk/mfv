@@ -7,8 +7,8 @@ published a web page, in combination with opentimestamps.org
 As an administrator, deploy the integrity verification system  
 by placing four critical files in your .well-known/mfv/ directory:  
 
-1) merkle_metadata.json (generated via mfv hash /path/to/your/webroot) --domain example.org   
-containing the Merkle tree structure and file hashes, and  
+1) merkle_metadata.json (generated via ' $ mfv hash /path/to/your/webroot)
+--domain example.org' containing the Merkle tree structure and file hashes, and   
 
 2) a signed timestamp document (e.g., merkle_metadata.json.ots) and  
 your DNS record as dns.txt.ots  by uploading merkle_metadata.json and
