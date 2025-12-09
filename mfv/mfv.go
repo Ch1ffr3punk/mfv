@@ -41,7 +41,7 @@ type FileInfo struct {
 // Metadata stores the complete state of a folder
 type Metadata struct {
 	RootHash      string     `json:"root_hash"`
-	Domain        string     `json:"domain,omitempty"`  // Domain binding for hash
+	Domain        string     `json:"domain,omitempty"`
 	FolderPath    string     `json:"folder_path"`
 	CreatedAt     time.Time  `json:"created_at"`
 	FileCount     int        `json:"file_count"`
@@ -71,38 +71,38 @@ type Config struct {
 // Default configuration
 var defaultConfig = Config{
 	ExcludePatterns: []string{
-		".well-known/*",           // ACME challenges, security files
-		"*.tmp",                   // Temporary files
-		"*.log",                   // Log files
-		".git/*",                  // Git directory
-		".DS_Store",               // macOS metadata
-		"Thumbs.db",               // Windows thumbnails
-		"merkle_metadata.json",    // Our own metadata file
-		"verification_report.json", // Verification reports
-		"merkle_config.json",      // Config file
+		".well-known/*",
+		"*.tmp",
+		"*.log",
+		".git/*",
+		".DS_Store",
+		"Thumbs.db",
+		"merkle_metadata.json",
+		"verification_report.json",
+		"merkle_config.json",
 	},
 	ExcludePaths: []string{
-		".well-known",             // Entire .well-known directory
-		".git",                    // Entire .git directory
+		".well-known",
+		".git",
 	},
 }
 
 // Constants
 const (
-	Version      = "0.4.0"
+	Version      = "1.0.0"
 	Algorithm    = "RIPEMD-160"
 	MetadataFile = "merkle_metadata.json"
 	ConfigFile   = "merkle_config.json"
 )
 
-// calculateRIPEMD160 computes RIPEMD-160 hash for byte array
+// Calculate RIPEMD-160 hash for byte array
 func calculateRIPEMD160(data []byte) string {
 	hasher := ripemd160.New()
 	hasher.Write(data)
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-// hashFile calculates RIPEMD-160 hash for a file
+// Hash a file with RIPEMD-160
 func hashFile(filePath string) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -118,28 +118,25 @@ func hashFile(filePath string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-// getFilePermissions returns file permissions in string format
+// Get file permissions in string format
 func getFilePermissions(mode os.FileMode) string {
 	return mode.String()
 }
 
-// shouldExclude checks if a path should be excluded based on config
+// Check if a path should be excluded
 func shouldExclude(path string, relPath string, config Config) bool {
-	// Check exact path matches
 	for _, excludePath := range config.ExcludePaths {
 		if relPath == excludePath || strings.HasPrefix(relPath, excludePath+"/") {
 			return true
 		}
 	}
 	
-	// Check pattern matches
 	for _, pattern := range config.ExcludePatterns {
 		matched, _ := filepath.Match(pattern, filepath.Base(relPath))
 		if matched {
 			return true
 		}
 		
-		// Check for path patterns with directories
 		matched, _ = filepath.Match(pattern, relPath)
 		if matched {
 			return true
@@ -149,10 +146,9 @@ func shouldExclude(path string, relPath string, config Config) bool {
 	return false
 }
 
-// loadConfig loads configuration from file or uses defaults
+// Load configuration from file or use defaults
 func loadConfig(configFile string) (Config, error) {
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		// Create default config file
 		configJSON, _ := json.MarshalIndent(defaultConfig, "", "  ")
 		os.WriteFile(configFile, configJSON, 0644)
 		return defaultConfig, nil
@@ -172,7 +168,7 @@ func loadConfig(configFile string) (Config, error) {
 	return config, nil
 }
 
-// collectFiles collects all files in a folder recursively with exclusions
+// Collect all files in a folder (recursively) with exclusions
 func collectFiles(rootPath string, config Config) ([]FileInfo, int64, []string, error) {
 	var files []FileInfo
 	var totalSize int64
@@ -188,35 +184,30 @@ func collectFiles(rootPath string, config Config) ([]FileInfo, int64, []string, 
 			return err
 		}
 
-		// Skip directories
 		if !info.Mode().IsRegular() {
 			return nil
 		}
 
-		// Get relative path
 		relPath, err := filepath.Rel(absRoot, path)
 		if err != nil {
 			return err
 		}
 
-		// Check if file should be excluded
 		if shouldExclude(path, relPath, config) {
 			excludedPaths = append(excludedPaths, relPath)
 			return nil
 		}
 
-		// Calculate file hash
 		hash, err := hashFile(path)
 		if err != nil {
 			return fmt.Errorf("hashing %s: %v", path, err)
 		}
 
-		// Store file information with UTC time
 		fileInfo := FileInfo{
 			Path:        relPath,
 			Hash:        hash,
 			Size:        info.Size(),
-			Modified:    info.ModTime().UTC(), // Convert to UTC
+			Modified:    info.ModTime().UTC(),
 			Permissions: getFilePermissions(info.Mode()),
 		}
 
@@ -226,7 +217,6 @@ func collectFiles(rootPath string, config Config) ([]FileInfo, int64, []string, 
 		return nil
 	})
 
-	// Sort by path for consistent order
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].Path < files[j].Path
 	})
@@ -235,81 +225,59 @@ func collectFiles(rootPath string, config Config) ([]FileInfo, int64, []string, 
 	return files, totalSize, excludedPaths, err
 }
 
-// NewMerkleNode creates a new Merkle tree node
-func NewMerkleNode(left, right *MerkleNode, hash string) *MerkleNode {
-	node := &MerkleNode{}
-
-	if left == nil && right == nil {
-		// Leaf node
-		node.Hash = hash
-	} else {
-		// Internal node - combine child hashes
-		combined := left.Hash
-		if right != nil {
-			combined += right.Hash
-		}
-		node.Hash = calculateRIPEMD160([]byte(combined))
-		node.Left = left
-		node.Right = right
-	}
-
-	return node
-}
-
-// NewMerkleTree builds a Merkle tree from a list of file hashes
-func NewMerkleTree(fileHashes []string) *MerkleTree {
+// Build a Merkle tree from a list of hashes - EXACT SAME AS CLIENT
+func buildMerkleTree(fileHashes []string) string {
 	if len(fileHashes) == 0 {
-		// Handle empty folder
-		emptyHash := calculateRIPEMD160([]byte(""))
-		return &MerkleTree{
-			Root: NewMerkleNode(nil, nil, emptyHash),
-		}
+		return calculateRIPEMD160([]byte(""))
 	}
 
-	var nodes []MerkleNode
-
-	// Create leaf nodes
+	var nodes []string
 	for _, hash := range fileHashes {
-		nodes = append(nodes, *NewMerkleNode(nil, nil, hash))
+		nodes = append(nodes, hash)
 	}
 
-	// If odd number of nodes, duplicate the last one
 	if len(nodes)%2 == 1 {
-		lastNode := nodes[len(nodes)-1]
-		nodes = append(nodes, lastNode)
+		nodes = append(nodes, nodes[len(nodes)-1])
 	}
 
-	// Build tree bottom-up
 	for len(nodes) > 1 {
-		var newLevel []MerkleNode
+		var newLevel []string
 
 		for i := 0; i < len(nodes); i += 2 {
-			var left, right *MerkleNode
-			left = &nodes[i]
-			
+			var combined string
 			if i+1 < len(nodes) {
-				right = &nodes[i+1]
+				combined = nodes[i] + nodes[i+1]
+			} else {
+				combined = nodes[i] + nodes[i]
 			}
-
-			newNode := NewMerkleNode(left, right, "")
-			newLevel = append(newLevel, *newNode)
+			newLevel = append(newLevel, calculateRIPEMD160([]byte(combined)))
 		}
 
-		// If odd number on this level
 		if len(newLevel)%2 == 1 && len(newLevel) > 1 {
-			lastNode := newLevel[len(newLevel)-1]
-			newLevel = append(newLevel, lastNode)
+			newLevel = append(newLevel, newLevel[len(newLevel)-1])
 		}
 
 		nodes = newLevel
 	}
 
+	if len(nodes) == 0 {
+		return calculateRIPEMD160([]byte(""))
+	}
+	return nodes[0]
+}
+
+// For backward compatibility
+func NewMerkleTree(fileHashes []string) *MerkleTree {
+	merkleRoot := buildMerkleTree(fileHashes)
+	
 	return &MerkleTree{
-		Root: &nodes[0],
+		Root: &MerkleNode{
+			Hash: merkleRoot,
+		},
 	}
 }
 
-// compareFiles compares two sets of files and detects changes
+// Compare two sets of files and detect changes
 func compareFiles(original, current []FileInfo) *ChangeResult {
 	result := &ChangeResult{
 		Added:     []FileInfo{},
@@ -318,7 +286,6 @@ func compareFiles(original, current []FileInfo) *ChangeResult {
 		Unchanged: []FileInfo{},
 	}
 
-	// Create maps for quick lookup
 	originalMap := make(map[string]FileInfo)
 	currentMap := make(map[string]FileInfo)
 
@@ -329,31 +296,25 @@ func compareFiles(original, current []FileInfo) *ChangeResult {
 		currentMap[file.Path] = file
 	}
 
-	// Check for modified and unchanged files
 	for path, currentFile := range currentMap {
 		originalFile, exists := originalMap[path]
 		if !exists {
-			// New file
 			result.Added = append(result.Added, currentFile)
 		} else {
 			if originalFile.Hash != currentFile.Hash {
-				// Modified file
 				result.Modified = append(result.Modified, currentFile)
 			} else {
-				// Unchanged file
 				result.Unchanged = append(result.Unchanged, currentFile)
 			}
 		}
 	}
 
-	// Check for deleted files
 	for path, originalFile := range originalMap {
 		if _, exists := currentMap[path]; !exists {
 			result.Deleted = append(result.Deleted, originalFile)
 		}
 	}
 
-	// Sort results for consistent output
 	sort.Slice(result.Added, func(i, j int) bool {
 		return result.Added[i].Path < result.Added[j].Path
 	})
@@ -367,7 +328,7 @@ func compareFiles(original, current []FileInfo) *ChangeResult {
 	return result
 }
 
-// saveMetadata saves metadata to JSON file
+// Save metadata to JSON file
 func saveMetadata(metadata *Metadata, outputFile string) error {
 	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
@@ -377,7 +338,7 @@ func saveMetadata(metadata *Metadata, outputFile string) error {
 	return os.WriteFile(outputFile, metadataJSON, 0644)
 }
 
-// loadMetadata loads metadata from JSON file
+// Load metadata from JSON file
 func loadMetadata(inputFile string) (*Metadata, error) {
 	data, err := os.ReadFile(inputFile)
 	if err != nil {
@@ -393,7 +354,7 @@ func loadMetadata(inputFile string) (*Metadata, error) {
 	return &metadata, nil
 }
 
-// formatTimeUTC formats time to UTC with Unix timestamp
+// Format time to UTC with Unix timestamp
 func formatTimeUTC(t time.Time) string {
 	utcTime := t.UTC()
 	return fmt.Sprintf("%s (Unix: %d)", 
@@ -401,7 +362,7 @@ func formatTimeUTC(t time.Time) string {
 		utcTime.Unix())
 }
 
-// formatBytes converts bytes to human readable format
+// Format bytes to human readable format
 func formatBytes(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
@@ -415,7 +376,16 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-// hashFolder creates a Merkle tree hash for a folder with optional domain binding
+// Apply domain binding to root hash (same as client)
+func applyDomainBinding(rootHash string, domain string) string {
+	if domain == "" {
+		return rootHash
+	}
+	combined := domain + rootHash
+	return calculateRIPEMD160([]byte(combined))
+}
+
+// Main function for "hash" command
 func hashFolder(folderPath string, outputFile string, config Config, domain string) error {
 	absPath, err := filepath.Abs(folderPath)
 	if err != nil {
@@ -429,33 +399,37 @@ func hashFolder(folderPath string, outputFile string, config Config, domain stri
 	fmt.Printf("Using configuration: %s\n", ConfigFile)
 	fmt.Println("Collecting files and calculating hashes...")
 
-	// Collect files with exclusions
 	files, totalSize, excludedPaths, err := collectFiles(absPath, config)
 	if err != nil {
 		return fmt.Errorf("failed to collect files: %v", err)
 	}
 
-	// Extract hashes for Merkle tree
 	var hashes []string
 	for _, file := range files {
 		hashes = append(hashes, file.Hash)
 	}
 
-	// Build initial Merkle tree (without domain)
-	tree := NewMerkleTree(hashes)
+	// Build Merkle tree using EXACT SAME algorithm as client
+	merkleRoot := buildMerkleTree(hashes)
 	
-	// If domain is provided, incorporate it into the root hash
-	finalRootHash := tree.Root.Hash
+	// Apply domain binding if provided
+	finalRootHash := merkleRoot
 	if domain != "" {
-		// Combine domain with root hash and hash again for domain binding
-		combined := domain + finalRootHash
-		finalRootHash = calculateRIPEMD160([]byte(combined))
+		finalRootHash = applyDomainBinding(merkleRoot, domain)
 	}
 
-	// Create metadata with UTC time
+	// DEBUG: Show intermediate values
+	fmt.Printf("\nDEBUG INFORMATION:\n")
+	fmt.Printf("  Number of files: %d\n", len(files))
+	fmt.Printf("  Merkle Root (without domain): %s\n", merkleRoot)
+	if domain != "" {
+		fmt.Printf("  Domain binding applied: %s\n", domain)
+		fmt.Printf("  Final Root Hash (with domain): %s\n", finalRootHash)
+	}
+
 	metadata := &Metadata{
 		RootHash:      finalRootHash,
-		Domain:        domain, // Store domain in metadata
+		Domain:        domain,
 		FolderPath:    absPath,
 		CreatedAt:     time.Now().UTC(),
 		FileCount:     len(files),
@@ -466,18 +440,17 @@ func hashFolder(folderPath string, outputFile string, config Config, domain stri
 		ExcludedPaths: excludedPaths,
 	}
 
-	// Save metadata
 	err = saveMetadata(metadata, outputFile)
 	if err != nil {
 		return fmt.Errorf("failed to save metadata: %v", err)
 	}
 
-	// Display results
-	fmt.Println("Analysis complete!")
+	fmt.Println("\nAnalysis complete!")
 	fmt.Printf("\nSummary:\n")
 	fmt.Printf("  Root Hash:       %s\n", finalRootHash)
 	if domain != "" {
 		fmt.Printf("  Domain:          %s (bound to root hash)\n", domain)
+		fmt.Printf("  Merkle Root:     %s (without domain, for debugging)\n", merkleRoot)
 	}
 	fmt.Printf("  Total Files:     %d (included)\n", len(files))
 	fmt.Printf("  Excluded Files:  %d\n", len(excludedPaths))
@@ -494,20 +467,16 @@ func hashFolder(folderPath string, outputFile string, config Config, domain stri
 	}
 
 	if len(files) > 0 {
-		fmt.Println("\nIncluded File Details:")
-		for _, file := range files {
-			fmt.Printf("  File: %s\n", file.Path)
-			fmt.Printf("    Hash: %s\n", file.Hash)
-			fmt.Printf("    Size: %s\n", formatBytes(file.Size))
-			fmt.Printf("    Modified: %s\n", formatTimeUTC(file.Modified))
-			fmt.Printf("    Permissions: %s\n", file.Permissions)
+		fmt.Println("\nFile Hashes (in order used for Merkle tree):")
+		for i, file := range files {
+			fmt.Printf("  %3d. %s: %s\n", i+1, file.Path, file.Hash)
 		}
 	}
 
 	return nil
 }
 
-// verifyFolder verifies a folder against saved metadata with optional domain binding
+// Main function for "verify" command
 func verifyFolder(folderPath string, metadataFile string, config Config, domain string) error {
 	absPath, err := filepath.Abs(folderPath)
 	if err != nil {
@@ -517,29 +486,17 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 	fmt.Printf("Verifying folder: %s\n", absPath)
 	fmt.Printf("Using configuration: %s\n", ConfigFile)
 
-	// Load original metadata
-	fmt.Printf("Loading metadata from: %s\n", metadataFile)
 	originalMetadata, err := loadMetadata(metadataFile)
 	if err != nil {
 		return fmt.Errorf("failed to load metadata: %v", err)
 	}
 
-	// Check if domain parameter matches stored domain
-	if domain != "" && originalMetadata.Domain != "" && domain != originalMetadata.Domain {
-		fmt.Printf("Warning: Domain parameter differs from stored domain\n")
-		fmt.Printf("  Stored: %s\n", originalMetadata.Domain)
-		fmt.Printf("  Provided: %s\n", domain)
-		fmt.Println("  Using provided domain for verification")
-	}
-	
-	// Use provided domain or stored domain
-	verifyDomain := domain
-	if verifyDomain == "" && originalMetadata.Domain != "" {
-		verifyDomain = originalMetadata.Domain
-		fmt.Printf("Using stored domain for verification: %s\n", verifyDomain)
+	domainForVerification := domain
+	if domainForVerification == "" && originalMetadata.Domain != "" {
+		domainForVerification = originalMetadata.Domain
+		fmt.Printf("Using stored domain for verification: %s\n", domainForVerification)
 	}
 
-	// Check if folder paths match
 	if absPath != originalMetadata.FolderPath {
 		fmt.Printf("Warning: Folder path differs from original\n")
 		fmt.Printf("  Original: %s\n", originalMetadata.FolderPath)
@@ -547,37 +504,29 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 		fmt.Println()
 	}
 
-	// Collect current files with same exclusions
 	fmt.Println("Analyzing current folder state...")
 	currentFiles, currentTotalSize, currentExcludedPaths, err := collectFiles(absPath, config)
 	if err != nil {
 		return fmt.Errorf("failed to collect current files: %v", err)
 	}
 
-	// Extract current hashes
 	var currentHashes []string
 	for _, file := range currentFiles {
 		currentHashes = append(currentHashes, file.Hash)
 	}
 
-	// Build current Merkle tree
-	currentTree := NewMerkleTree(currentHashes)
+	// Use EXACT SAME algorithm as client
+	currentMerkleRoot := buildMerkleTree(currentHashes)
 	
-	// Calculate final root hash with domain if applicable
-	currentRootHash := currentTree.Root.Hash
-	if verifyDomain != "" {
-		// Apply domain binding same as during hash creation
-		combined := verifyDomain + currentRootHash
-		currentRootHash = calculateRIPEMD160([]byte(combined))
+	currentRootHash := currentMerkleRoot
+	if domainForVerification != "" {
+		currentRootHash = applyDomainBinding(currentMerkleRoot, domainForVerification)
 	}
 
-	// Compare root hashes
 	rootMatch := originalMetadata.RootHash == currentRootHash
 
-	// Compare individual files
 	changes := compareFiles(originalMetadata.Files, currentFiles)
 
-	// Set result message
 	if rootMatch && len(changes.Added) == 0 && len(changes.Modified) == 0 && len(changes.Deleted) == 0 {
 		changes.Message = "Folder is UNCHANGED. All included files are identical."
 		changes.RootMatch = true
@@ -586,18 +535,18 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 		changes.RootMatch = false
 	}
 
-	// Display results
 	fmt.Printf("\n%s\n", changes.Message)
 	fmt.Printf("\nComparison Results:\n")
 	fmt.Printf("  Original Root:    %s\n", originalMetadata.RootHash)
 	fmt.Printf("  Current Root:     %s\n", currentRootHash)
+	fmt.Printf("  Root Match:       %v\n", rootMatch)
 	if originalMetadata.Domain != "" {
 		fmt.Printf("  Stored Domain:    %s\n", originalMetadata.Domain)
 	}
-	if verifyDomain != "" {
-		fmt.Printf("  Domain Binding:   %s\n", verifyDomain)
+	if domainForVerification != "" {
+		fmt.Printf("  Domain Binding:   %s\n", domainForVerification)
+		fmt.Printf("  Merkle Root:      %s (without domain)\n", currentMerkleRoot)
 	}
-	fmt.Printf("  Root Match:       %v\n", rootMatch)
 	fmt.Printf("  Original Created: %s\n", formatTimeUTC(originalMetadata.CreatedAt))
 	fmt.Printf("  Verification At:  %s\n", formatTimeUTC(time.Now().UTC()))
 	fmt.Printf("  Original Files:   %d (included)\n", len(originalMetadata.Files))
@@ -607,7 +556,6 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 	fmt.Printf("  Original Size:    %s (included)\n", formatBytes(originalMetadata.TotalSize))
 	fmt.Printf("  Current Size:     %s (included)\n", formatBytes(currentTotalSize))
 
-	// Show excluded paths if they differ
 	if len(currentExcludedPaths) > 0 {
 		fmt.Printf("\nCurrently Excluded Paths (%d):\n", len(currentExcludedPaths))
 		for _, path := range currentExcludedPaths {
@@ -615,7 +563,6 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 		}
 	}
 
-	// Display changes
 	if len(changes.Added) > 0 {
 		fmt.Printf("\nAdded Files (%d):\n", len(changes.Added))
 		for _, file := range changes.Added {
@@ -629,7 +576,6 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 	if len(changes.Modified) > 0 {
 		fmt.Printf("\nModified Files (%d):\n", len(changes.Modified))
 		for _, file := range changes.Modified {
-			// Find original file for comparison
 			var originalFile *FileInfo
 			for _, f := range originalMetadata.Files {
 				if f.Path == file.Path {
@@ -664,12 +610,12 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 		fmt.Printf("\nUnchanged Files: %d files\n", len(changes.Unchanged))
 	}
 
-	// Save verification report with UTC timestamps
 	report := map[string]interface{}{
 		"verification_date":    time.Now().UTC().Format(time.RFC3339),
 		"verification_unix":    time.Now().UTC().Unix(),
-		"domain_used":          verifyDomain,
+		"domain_used":          domainForVerification,
 		"original_metadata":    originalMetadata,
+		"current_merkle_root":  currentMerkleRoot,
 		"current_root_hash":    currentRootHash,
 		"changes":              changes,
 		"root_match":           rootMatch,
@@ -705,7 +651,6 @@ func main() {
 
 	command := os.Args[1]
 	
-	// Handle config command separately
 	if command == "config" {
 		config, err := loadConfig(ConfigFile)
 		if err != nil {
@@ -734,13 +679,11 @@ func main() {
 	
 	folderPath := os.Args[2]
 
-	// Check if folder exists
 	if _, err := os.Stat(folderPath); os.IsNotExist(err) {
 		fmt.Printf("Error: Folder '%s' does not exist\n", folderPath)
 		os.Exit(1)
 	}
 
-	// Load configuration
 	config, err := loadConfig(ConfigFile)
 	if err != nil {
 		fmt.Printf("Warning: Could not load config file: %v\n", err)
@@ -748,17 +691,14 @@ func main() {
 		config = defaultConfig
 	}
 
-	// Parse command line arguments
 	metadataFile := MetadataFile
 	domain := ""
 	
-	// Parse additional arguments
 	for i := 3; i < len(os.Args); i++ {
 		if os.Args[i] == "--domain" && i+1 < len(os.Args) {
 			domain = os.Args[i+1]
-			i++ // Skip next argument
+			i++
 		} else if !strings.HasPrefix(os.Args[i], "--") {
-			// Assume it's the metadata file if not a flag
 			metadataFile = os.Args[i]
 		}
 	}
@@ -771,7 +711,6 @@ func main() {
 			os.Exit(1)
 		}
 	case "verify":
-		// Check if metadata file exists
 		if _, err := os.Stat(metadataFile); os.IsNotExist(err) {
 			fmt.Printf("Error: Metadata file '%s' not found\n", metadataFile)
 			fmt.Println("Run 'mfv hash' first to create a baseline")
