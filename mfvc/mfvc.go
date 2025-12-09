@@ -975,10 +975,13 @@ func main() {
 		serverURL = "https://" + serverURL
 	}
 
+	// Handle download mode
 	if downloadProofsFlag {
 		downloadProofs(serverURL)
 		
-		if useDNS || saveReport {
+		// Only ask if ONLY --download was specified (no other verification params)
+		if !useDNS && !saveReport {
+			// Pure download mode - ask if user wants verification
 			fmt.Print("\nDo you want to continue with verification? (y/n): ")
 			var response string
 			fmt.Scanln(&response)
@@ -1002,10 +1005,28 @@ func main() {
 			} else {
 				fmt.Println("Download completed. Verification skipped.")
 			}
+		} else {
+			// User specified --dns and/or --save with --download, so auto-continue
+			fmt.Println("\n" + strings.Repeat("=", 70))
+			fmt.Println("CONTINUING WITH VERIFICATION (--dns/--save specified)")
+			fmt.Println(strings.Repeat("=", 70))
+			result := verifyRemote(serverURL, useDNS)
+			displayResults(result)
+
+			if saveReport {
+				if err := saveVerificationResult(result); err != nil {
+					fmt.Printf("Warning: Could not save report: %v\n", err)
+				}
+			}
+
+			if !result.Success {
+				fmt.Println("\nVerification failed, but proof files were downloaded.")
+			}
 		}
 		return
 	}
 
+	// Normal verification mode (without --download)
 	result := verifyRemote(serverURL, useDNS)
 	displayResults(result)
 
