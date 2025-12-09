@@ -26,6 +26,7 @@ type FileInfo struct {
 // Metadata stores the complete state of a folder
 type Metadata struct {
 	RootHash      string     `json:"root_hash"`
+	Domain        string     `json:"domain,omitempty"` // Domain binding field
 	FolderPath    string     `json:"folder_path"`
 	CreatedAt     time.Time  `json:"created_at"`
 	FileCount     int        `json:"file_count"`
@@ -84,7 +85,7 @@ type DownloadResult struct {
 
 // Constants
 const (
-	Version   = "0.3.0"
+	Version   = "0.4.0"
 	Algorithm = "RIPEMD-160"
 )
 
@@ -103,6 +104,16 @@ func calculateRIPEMD160(data []byte) string {
 	hasher := ripemd160.New()
 	hasher.Write(data)
 	return fmt.Sprintf("%x", hasher.Sum(nil))
+}
+
+// Apply domain binding to root hash (same logic as server)
+func applyDomainBinding(rootHash string, domain string) string {
+	if domain == "" {
+		return rootHash // No domain binding if no domain specified
+	}
+	// Same logic as server: combine domain with root hash and hash again
+	combined := domain + rootHash
+	return calculateRIPEMD160([]byte(combined))
 }
 
 // Download file from URL and save to local path
@@ -484,7 +495,7 @@ func queryDNSHash(domain string) (*DNSRecord, error) {
 				}
 			}
 
-			// Reiner Hash
+			// Plain hash
 			if len(cleanRecord) == 40 && isHex(cleanRecord) {
 				return &DNSRecord{
 					Hash:      cleanRecord,
@@ -545,9 +556,14 @@ func displayResults(result *VerificationResult) {
 	fmt.Printf("Verification Date: %s\n", formatTimeUTC(result.VerificationDate))
 	fmt.Printf("Domain:           %s\n", result.Domain)
 	
-	if result.OriginalMetadata != nil && len(result.OriginalMetadata.ExcludedPaths) > 0 {
-		fmt.Printf("Excluded Files:   %d (e.g., .well-known/, .git/)\n", 
-			len(result.OriginalMetadata.ExcludedPaths))
+	if result.OriginalMetadata != nil {
+		if result.OriginalMetadata.Domain != "" {
+			fmt.Printf("Domain Binding:   %s (from metadata)\n", result.OriginalMetadata.Domain)
+		}
+		if len(result.OriginalMetadata.ExcludedPaths) > 0 {
+			fmt.Printf("Excluded Files:   %d (e.g., .well-known/, .git/)\n", 
+				len(result.OriginalMetadata.ExcludedPaths))
+		}
 	}
 	fmt.Println()
 
@@ -567,6 +583,9 @@ func displayResults(result *VerificationResult) {
 	fmt.Printf("  Original Root Hash:    %s\n", result.OriginalMetadata.RootHash)
 	fmt.Printf("  Calculated Root Hash:  %s\n", result.CalculatedRoot)
 	fmt.Printf("  Root Hash Match:       %v\n", result.RootMatch)
+	if result.OriginalMetadata.Domain != "" {
+		fmt.Printf("  Domain Binding:        %s (applied)\n", result.OriginalMetadata.Domain)
+	}
 	fmt.Printf("  Metadata Created:      %s\n", formatTimeUTC(result.OriginalMetadata.CreatedAt))
 	fmt.Printf("  Original File Count:   %d (included)\n", len(result.OriginalMetadata.Files))
 	fmt.Printf("  Current File Count:    %d (included)\n", len(result.CurrentFiles))
@@ -603,6 +622,9 @@ func displayResults(result *VerificationResult) {
 		fmt.Printf("  DNS Hash Match:       %v\n", result.DNSMatch)
 		if !result.DNSMatch {
 			fmt.Printf("  WARNING: DNS hash does not match calculated hash!\n")
+			if result.OriginalMetadata.Domain != "" {
+				fmt.Printf("  Note: DNS might not include domain binding\n")
+			}
 		}
 		fmt.Println()
 	}
@@ -731,6 +753,14 @@ func verifyRemote(serverURL string, useDNS bool) *VerificationResult {
 	fmt.Printf("Metadata found. Created: %s\n", formatTimeUTC(metadata.CreatedAt))
 	fmt.Printf("Original file count: %d (included)\n", metadata.FileCount)
 	
+	// Show domain binding info
+	if metadata.Domain != "" {
+		fmt.Printf("Domain binding detected: %s\n", metadata.Domain)
+		fmt.Printf("Note: Root hash includes domain binding\n")
+	} else {
+		fmt.Printf("No domain binding in metadata (legacy mode)\n")
+	}
+	
 	if len(metadata.ExcludedPaths) > 0 {
 		fmt.Printf("Excluded files: %d (e.g., %s)\n", 
 			len(metadata.ExcludedPaths),
@@ -754,7 +784,13 @@ func verifyRemote(serverURL string, useDNS bool) *VerificationResult {
 	for _, file := range currentFiles {
 		currentHashes = append(currentHashes, file.Hash)
 	}
-	result.CalculatedRoot = buildMerkleTree(currentHashes)
+	
+	// Build Merkle tree
+	merkleRoot := buildMerkleTree(currentHashes)
+	
+	// Apply domain binding if present in metadata (same as server logic)
+	finalRootHash := applyDomainBinding(merkleRoot, metadata.Domain)
+	result.CalculatedRoot = finalRootHash
 
 	// Compare root hashes
 	result.RootMatch = metadata.RootHash == result.CalculatedRoot
@@ -772,7 +808,16 @@ func verifyRemote(serverURL string, useDNS bool) *VerificationResult {
 
 	// Compare with DNS if available
 	if result.DNSRecord != nil {
+		// Note: DNS hash might not include domain binding
 		result.DNSMatch = result.DNSRecord.Hash == result.CalculatedRoot
+		if !result.DNSMatch && metadata.Domain != "" {
+			// DNS might have stored the hash without domain binding
+			// Try comparing without domain binding
+			if result.DNSRecord.Hash == merkleRoot {
+				fmt.Printf("Note: DNS hash matches without domain binding\n")
+				result.DNSMatch = true
+			}
+		}
 	}
 
 	result.Success = true
@@ -828,6 +873,8 @@ func main() {
 		fmt.Println("  mfvc https://example.com --dns --save")
 		fmt.Println("  mfvc https://example.com --download")
 		fmt.Println("  mfvc http://192.168.1.100:8080 --download")
+		fmt.Println()
+		fmt.Println("Note: Domain binding is automatically detected from metadata")
 		os.Exit(1)
 	}
 
@@ -836,8 +883,9 @@ func main() {
 	saveReport := false
 	downloadProofsFlag := false
 
-	for _, arg := range os.Args[2:] {
-		switch arg {
+	// Parse command line arguments
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
 		case "--dns":
 			useDNS = true
 		case "--save":
@@ -845,7 +893,8 @@ func main() {
 		case "--download":
 			downloadProofsFlag = true
 		default:
-			fmt.Printf("Warning: Unknown argument: %s\n", arg)
+			fmt.Printf("Warning: Unknown argument: %s\n", os.Args[i])
+			fmt.Println("Valid arguments: --dns, --save, --download")
 		}
 	}
 
