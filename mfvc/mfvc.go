@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ripemd160"
+	"golang.org/x/net/proxy"
 )
 
 // FileInfo stores file metadata and hash
@@ -30,7 +32,7 @@ type Metadata struct {
 	FolderPath    string     `json:"folder_path"`
 	CreatedAt     time.Time  `json:"created_at"`
 	FileCount     int        `json:"file_count"`
-	TotalSize     int64      `json:"total_size"`
+	TotalSize     int64     `json:"total_size"`
 	Files         []FileInfo `json:"files"`
 	Algorithm     string     `json:"algorithm"`
 	Version       string     `json:"version"`
@@ -89,8 +91,9 @@ type DownloadResult struct {
 
 // Constants
 const (
-	Version   = "0.4.0"
+	Version   = "0.4.1"
 	Algorithm = "RIPEMD-160"
+	TorProxy  = "127.0.0.1:9050"
 )
 
 // Helper function to check if string is hex
@@ -119,24 +122,61 @@ func applyDomainBinding(rootHash string, domain string) string {
 	return calculateRIPEMD160([]byte(combined))
 }
 
-// Download file from URL and save to local path
-func downloadFile(url string, filepath string) error {
+// Create HTTP client with or without Tor
+func createHTTPClient(useTor bool) (*http.Client, error) {
+	if !useTor {
+		return &http.Client{
+			Timeout: 30 * time.Second,
+		}, nil
+	}
+
+	// Create SOCKS5 dialer for Tor
+	dialer, err := proxy.SOCKS5("tcp", TorProxy, nil, proxy.Direct)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Tor dialer: %v", err)
+	}
+
+	// Create HTTP transport with Tor dialer
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.Dial(network, addr)
+		},
+		DisableKeepAlives: true, // Better for Tor
+	}
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   60 * time.Second, // Longer timeout for Tor
+	}, nil
+}
+
+// Download file from URL with optional Tor
+func downloadFile(url string, filepath string, useTor bool) error {
+	client, err := createHTTPClient(useTor)
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP client: %v", err)
+	}
+
+	// Create the file
 	out, err := os.Create(filepath)
 	if err != nil {
 		return fmt.Errorf("failed to create file %s: %v", filepath, err)
 	}
 	defer out.Close()
 
-	resp, err := http.Get(url)
+	// Get the data
+	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("failed to download %s: %v", url, err)
 	}
 	defer resp.Body.Close()
 
+	// Check server response
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad status: %s for %s", resp.Status, url)
 	}
 
+	// Write the body to file
 	_, err = io.Copy(out, resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to write file %s: %v", filepath, err)
@@ -145,8 +185,8 @@ func downloadFile(url string, filepath string) error {
 	return nil
 }
 
-// Download proof files from server
-func downloadProofs(serverURL string) *DownloadResult {
+// Download proof files from server with optional Tor
+func downloadProofs(serverURL string, useTor bool) *DownloadResult {
 	result := &DownloadResult{
 		Success:       false,
 		Timestamp:     time.Now().UTC(),
@@ -154,11 +194,18 @@ func downloadProofs(serverURL string) *DownloadResult {
 		ErrorMessages: []string{},
 	}
 
+	mode := "normal"
+	if useTor {
+		mode = "Tor"
+	}
+	
 	fmt.Println(strings.Repeat("=", 70))
-	fmt.Println("DOWNLOADING PROOF FILES")
-	fmt.Println("Mode: Download only - verification may fail")
+	fmt.Printf("DOWNLOADING PROOF FILES (Mode: %s)\n", mode)
 	fmt.Println(strings.Repeat("=", 70))
 	fmt.Printf("Server URL: %s\n", serverURL)
+	if useTor {
+		fmt.Printf("Using Tor proxy: %s\n", TorProxy)
+	}
 	fmt.Println()
 
 	filesToDownload := []struct {
@@ -195,7 +242,7 @@ func downloadProofs(serverURL string) *DownloadResult {
 		
 		fmt.Printf("Trying: %s ... ", url)
 
-		if err := downloadFile(url, file.localName); err == nil {
+		if err := downloadFile(url, file.localName, useTor); err == nil {
 			if info, err := os.Stat(file.localName); err == nil {
 				totalSize += info.Size()
 			}
@@ -226,8 +273,9 @@ func downloadProofs(serverURL string) *DownloadResult {
 
 	fmt.Println(strings.Repeat("-", 70))
 	fmt.Printf("Download Summary:\n")
+	fmt.Printf("  Mode:            %s\n", mode)
 	fmt.Printf("  Files downloaded: %d\n", successCount)
-	fmt.Printf("  Total size: %s\n", formatBytes(totalSize))
+	fmt.Printf("  Total size:      %s\n", formatBytes(totalSize))
 	
 	if len(result.Files) > 0 {
 		fmt.Printf("  Downloaded files:\n")
@@ -252,8 +300,13 @@ func downloadProofs(serverURL string) *DownloadResult {
 	return result
 }
 
-// Fetch metadata from server
-func fetchMetadata(serverURL string) (*Metadata, error) {
+// Fetch metadata from server with optional Tor
+func fetchMetadata(serverURL string, useTor bool) (*Metadata, error) {
+	client, err := createHTTPClient(useTor)
+	if err != nil {
+		return nil, err
+	}
+
 	possiblePaths := []string{
 		".well-known/mfv/merkle_metadata.json",
 		".well-known/merkle-metadata.json",
@@ -264,7 +317,7 @@ func fetchMetadata(serverURL string) (*Metadata, error) {
 	for _, path := range possiblePaths {
 		url := fmt.Sprintf("%s/%s", strings.TrimSuffix(serverURL, "/"), path)
 		
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 		if err != nil {
 			lastError = err
 			continue
@@ -283,15 +336,20 @@ func fetchMetadata(serverURL string) (*Metadata, error) {
 	return nil, fmt.Errorf("metadata not found. Last error: %v", lastError)
 }
 
-// Collect all files from remote server
-func collectRemoteFiles(serverURL string, metadata *Metadata) ([]FileInfo, int64, error) {
+// Collect all files from remote server with optional Tor
+func collectRemoteFiles(serverURL string, metadata *Metadata, useTor bool) ([]FileInfo, int64, error) {
+	client, err := createHTTPClient(useTor)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	var files []FileInfo
 	var totalSize int64
 
 	for _, fileInfo := range metadata.Files {
 		fileURL := fmt.Sprintf("%s/%s", strings.TrimSuffix(serverURL, "/"), fileInfo.Path)
 		
-		resp, err := http.Get(fileURL)
+		resp, err := client.Get(fileURL)
 		if err != nil {
 			fmt.Printf("Warning: Could not fetch %s: %v\n", fileInfo.Path, err)
 			continue
@@ -440,8 +498,8 @@ func compareFiles(original, current []FileInfo) *ChangeResult {
 	return result
 }
 
-// Query DNS for Merkle hash
-func queryDNSHash(domain string) (*DNSRecord, error) {
+// Query DNS for Merkle hash with optional Tor
+func queryDNSHash(domain string, useTor bool) (*DNSRecord, error) {
 	attempts := []string{
 		domain,
 		"_merkle." + domain,
@@ -450,8 +508,35 @@ func queryDNSHash(domain string) (*DNSRecord, error) {
 		"_integrity." + domain,
 	}
 
+	// Create resolver with or without Tor
+	var resolver *net.Resolver
+	
+	if useTor {
+		// Create SOCKS5 dialer for Tor
+		dialer, err := proxy.SOCKS5("tcp", TorProxy, nil, proxy.Direct)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Tor dialer for DNS: %v", err)
+		}
+		
+		// Create custom resolver that uses Tor
+		resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				return dialer.Dial(network, address)
+			},
+		}
+	}
+
 	for _, d := range attempts {
-		txtRecords, err := net.LookupTXT(d)
+		var txtRecords []string
+		var err error
+		
+		if useTor && resolver != nil {
+			txtRecords, err = resolver.LookupTXT(context.Background(), d)
+		} else {
+			txtRecords, err = net.LookupTXT(d)
+		}
+		
 		if err != nil {
 			continue
 		}
@@ -626,7 +711,6 @@ func displayResults(result *VerificationResult) {
 	if result.MetadataDomain != "" {
 		fmt.Printf("  Metadata Domain:        %s\n", result.MetadataDomain)
 		
-		// STRICT CHECK: Domains MUST match
 		if result.URLDomain != result.MetadataDomain {
 			fmt.Printf("      DOMAIN MISMATCH:     %s != %s\n", 
 				result.URLDomain, result.MetadataDomain)
@@ -756,8 +840,8 @@ func getTotalSize(files []FileInfo) int64 {
 	return total
 }
 
-// Main verification function - STRICT MODE, NO MIGRATION
-func verifyRemote(serverURL string, useDNS bool) *VerificationResult {
+// Main verification function with Tor support
+func verifyRemote(serverURL string, useDNS bool, useTor bool) *VerificationResult {
 	urlDomain := extractDomain(serverURL)
 	
 	result := &VerificationResult{
@@ -768,14 +852,19 @@ func verifyRemote(serverURL string, useDNS bool) *VerificationResult {
 		ContentTheft:     false,
 	}
 
-	fmt.Printf("Starting STRICT verification of: %s\n", serverURL)
+	mode := "normal"
+	if useTor {
+		mode = "Tor"
+	}
+	
+	fmt.Printf("Starting STRICT verification of: %s (Mode: %s)\n", serverURL, mode)
 	fmt.Printf("URL Domain: %s\n", urlDomain)
 	fmt.Println("STRICT MODE: No domain migration allowed")
 	fmt.Println(strings.Repeat("-", 70))
 
 	if useDNS {
 		fmt.Println("Querying DNS for Merkle hash...")
-		dnsRecord, err := queryDNSHash(urlDomain)
+		dnsRecord, err := queryDNSHash(urlDomain, useTor)
 		if err != nil {
 			fmt.Printf("DNS query failed: %v\n", err)
 		} else {
@@ -785,7 +874,7 @@ func verifyRemote(serverURL string, useDNS bool) *VerificationResult {
 	}
 
 	fmt.Println("\nFetching metadata from server...")
-	metadata, err := fetchMetadata(serverURL)
+	metadata, err := fetchMetadata(serverURL, useTor)
 	if err != nil {
 		result.ErrorMessage = fmt.Sprintf("Failed to fetch metadata: %v", err)
 		return result
@@ -818,7 +907,7 @@ func verifyRemote(serverURL string, useDNS bool) *VerificationResult {
 	}
 
 	fmt.Println("\nCollecting current files from server...")
-	currentFiles, _, err := collectRemoteFiles(serverURL, metadata)
+	currentFiles, _, err := collectRemoteFiles(serverURL, metadata, useTor)
 	if err != nil {
 		result.ErrorMessage = fmt.Sprintf("Failed to collect files: %v", err)
 		return result
@@ -936,20 +1025,21 @@ func main() {
 		fmt.Println("• Verification fails on domain mismatch")
 		fmt.Println()
 		fmt.Println("Usage:")
-		fmt.Println("  mfvc <server-url> [--dns] [--save] [--download]")
+		fmt.Println("  mfvc <server-url> [--dns] [--save] [--download] [--tor]")
 		fmt.Println()
 		fmt.Println("Arguments:")
 		fmt.Println("  <server-url>    URL of the server to verify")
 		fmt.Println("  --dns           Also verify against DNS TXT records")
 		fmt.Println("  --save          Save detailed JSON report (even if failed)")
 		fmt.Println("  --download      Download proof files (works even if verification fails)")
+		fmt.Println("  --tor           Use Tor proxy (SOCKS5 127.0.0.1:9050)")
 		fmt.Println()
 		fmt.Println("Examples:")
 		fmt.Println("  mfvc https://example.com")
-		fmt.Println("  mfvc https://example.com --dns")
-		fmt.Println("  mfvc https://example.com --dns --save")
-		fmt.Println("  mfvc https://example.com --download")
-		fmt.Println("  mfvc https://suspicious-site.com --download  # Download proofs for analysis")
+		fmt.Println("  mfvc https://example.com --dns --tor")
+		fmt.Println("  mfvc https://example.com --download --tor")
+		fmt.Println("  mfvc http://example.onion --tor")
+		fmt.Println("  mfvc https://suspicious-site.com --download --tor")
 		os.Exit(1)
 	}
 
@@ -957,6 +1047,7 @@ func main() {
 	useDNS := false
 	saveReport := false
 	downloadProofsFlag := false
+	useTor := false
 
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -966,22 +1057,40 @@ func main() {
 			saveReport = true
 		case "--download":
 			downloadProofsFlag = true
+		case "--tor":
+			useTor = true
 		default:
 			fmt.Printf("Warning: Unknown argument: %s\n", os.Args[i])
 		}
+	}
+
+	// Warn if using Tor with non-onion address
+	if useTor && !strings.Contains(serverURL, ".onion") {
+		fmt.Printf("    Note: Using Tor with clearnet address\n")
+		fmt.Printf("   All traffic (HTTP and DNS) will go through Tor network.\n")
+	}
+	
+	// Check if Tor is running when --tor is specified
+	if useTor {
+		conn, err := net.DialTimeout("tcp", TorProxy, 2*time.Second)
+		if err != nil {
+			fmt.Printf("    Warning: Cannot connect to Tor proxy at %s\n", TorProxy)
+			fmt.Printf("   Make sure Tor is running: sudo systemctl start tor\n")
+			fmt.Printf("   Or install Tor: sudo apt-get install tor\n")
+			os.Exit(1)
+		}
+		conn.Close()
 	}
 
 	if !strings.HasPrefix(serverURL, "http://") && !strings.HasPrefix(serverURL, "https://") {
 		serverURL = "https://" + serverURL
 	}
 
-	// Handle download mode
 	if downloadProofsFlag {
-		downloadProofs(serverURL)
+		downloadProofs(serverURL, useTor)
 		
 		// Only ask if ONLY --download was specified (no other verification params)
 		if !useDNS && !saveReport {
-			// Pure download mode - ask if user wants verification
 			fmt.Print("\nDo you want to continue with verification? (y/n): ")
 			var response string
 			fmt.Scanln(&response)
@@ -990,7 +1099,7 @@ func main() {
 				fmt.Println("\n" + strings.Repeat("=", 70))
 				fmt.Println("CONTINUING WITH STRICT VERIFICATION AFTER DOWNLOAD")
 				fmt.Println(strings.Repeat("=", 70))
-				result := verifyRemote(serverURL, useDNS)
+				result := verifyRemote(serverURL, useDNS, useTor)
 				displayResults(result)
 
 				if saveReport {
@@ -1010,7 +1119,7 @@ func main() {
 			fmt.Println("\n" + strings.Repeat("=", 70))
 			fmt.Println("CONTINUING WITH VERIFICATION (--dns/--save specified)")
 			fmt.Println(strings.Repeat("=", 70))
-			result := verifyRemote(serverURL, useDNS)
+			result := verifyRemote(serverURL, useDNS, useTor)
 			displayResults(result)
 
 			if saveReport {
@@ -1027,7 +1136,7 @@ func main() {
 	}
 
 	// Normal verification mode (without --download)
-	result := verifyRemote(serverURL, useDNS)
+	result := verifyRemote(serverURL, useDNS, useTor)
 	displayResults(result)
 
 	if saveReport {
