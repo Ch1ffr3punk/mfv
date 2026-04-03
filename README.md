@@ -29,6 +29,10 @@ Example:
 
 _merkle.example.org IN TXT "merkle-root=9f327e3d7c3c2d1a4b5c6d7e8f9a0b1c2d3e4f5a6"
 
+3) If you use [yubicyrpt](https://github.com/Ch1ffr3punk/yubicrypt) as a modern replacement for OpenPGP  
+you may appreciate that mfv supports the .well-known/yubicrypt/ directory  
+where you can store yubicrypt encryption certificates along with their respective .ots files.  
+
 ## For End Users (Verification Side)
 
 To perform complete integrity verification, download the four files from the   
