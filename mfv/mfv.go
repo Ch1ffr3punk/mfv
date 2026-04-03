@@ -23,10 +23,10 @@ type MerkleNode struct {
 
 // MerkleTree represents the entire Merkle tree
 type MerkleTree struct {
-	Root        *MerkleNode
-	FileCount   int
-	CreatedAt   time.Time
-	FolderPath  string
+	Root       *MerkleNode
+	FileCount  int
+	CreatedAt  time.Time
+	FolderPath string
 }
 
 // FileInfo stores file metadata and hash
@@ -54,12 +54,12 @@ type Metadata struct {
 
 // ChangeResult stores detected changes
 type ChangeResult struct {
-	Added      []FileInfo `json:"added"`
-	Modified   []FileInfo `json:"modified"`
-	Deleted    []FileInfo `json:"deleted"`
-	Unchanged  []FileInfo `json:"unchanged"`
-	RootMatch  bool       `json:"root_match"`
-	Message    string     `json:"message"`
+	Added     []FileInfo `json:"added"`
+	Modified  []FileInfo `json:"modified"`
+	Deleted   []FileInfo `json:"deleted"`
+	Unchanged []FileInfo `json:"unchanged"`
+	RootMatch bool       `json:"root_match"`
+	Message   string     `json:"message"`
 }
 
 // Config for exclusions
@@ -68,10 +68,10 @@ type Config struct {
 	ExcludePaths    []string `json:"exclude_paths"`
 }
 
-// Default configuration
+// Default configuration - .well-known is excluded EXCEPT for yubicrypt
 var defaultConfig = Config{
 	ExcludePatterns: []string{
-		".well-known/*",
+		".well-known/*",     // Exclude all .well-known by default
 		"*.tmp",
 		"*.log",
 		".git/*",
@@ -82,7 +82,7 @@ var defaultConfig = Config{
 		"merkle_config.json",
 	},
 	ExcludePaths: []string{
-		".well-known",
+		".well-known",       // Exclude .well-known directory
 		".git",
 	},
 }
@@ -93,6 +93,7 @@ const (
 	Algorithm    = "RIPEMD-160"
 	MetadataFile = "merkle_metadata.json"
 	ConfigFile   = "merkle_config.json"
+	YubiCryptDir = ".well-known/yubicrypt" // YubiCrypt certificates directory - ONLY this is included
 )
 
 // Calculate RIPEMD-160 hash for byte array
@@ -123,26 +124,31 @@ func getFilePermissions(mode os.FileMode) string {
 	return mode.String()
 }
 
-// Check if a path should be excluded
+// Check if a path should be excluded - with special handling for YubiCrypt
 func shouldExclude(path string, relPath string, config Config) bool {
+	// SPECIAL RULE: NEVER exclude YubiCrypt directory contents
+	if strings.Contains(relPath, YubiCryptDir) {
+		return false
+	}
+
 	for _, excludePath := range config.ExcludePaths {
 		if relPath == excludePath || strings.HasPrefix(relPath, excludePath+"/") {
 			return true
 		}
 	}
-	
+
 	for _, pattern := range config.ExcludePatterns {
 		matched, _ := filepath.Match(pattern, filepath.Base(relPath))
 		if matched {
 			return true
 		}
-		
+
 		matched, _ = filepath.Match(pattern, relPath)
 		if matched {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -153,30 +159,80 @@ func loadConfig(configFile string) (Config, error) {
 		os.WriteFile(configFile, configJSON, 0644)
 		return defaultConfig, nil
 	}
-	
+
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		return defaultConfig, err
 	}
-	
+
 	var config Config
 	err = json.Unmarshal(data, &config)
 	if err != nil {
 		return defaultConfig, err
 	}
-	
+
 	return config, nil
 }
 
-// Collect all files in a folder (recursively) with exclusions
-func collectFiles(rootPath string, config Config) ([]FileInfo, int64, []string, error) {
+// collectYubiCryptFiles collects all .crt and .ots files from .well-known/yubicrypt directory
+func collectYubiCryptFiles(rootPath string) ([]FileInfo, error) {
+	var yubicryptFiles []FileInfo
+	yubicryptPath := filepath.Join(rootPath, YubiCryptDir)
+
+	// Check if YubiCrypt directory exists
+	if _, err := os.Stat(yubicryptPath); os.IsNotExist(err) {
+		return yubicryptFiles, nil
+	}
+
+	err := filepath.Walk(yubicryptPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+
+		// Only include .crt and .ots files
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".crt" && ext != ".ots" {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(rootPath, path)
+		if err != nil {
+			return err
+		}
+
+		hash, err := hashFile(path)
+		if err != nil {
+			return fmt.Errorf("hashing %s: %v", path, err)
+		}
+
+		fileInfo := FileInfo{
+			Path:        relPath,
+			Hash:        hash,
+			Size:        info.Size(),
+			Modified:    info.ModTime().UTC(),
+			Permissions: getFilePermissions(info.Mode()),
+		}
+
+		yubicryptFiles = append(yubicryptFiles, fileInfo)
+		return nil
+	})
+
+	return yubicryptFiles, err
+}
+
+// Collect all files in a folder (recursively) with exclusions, including only YubiCrypt from .well-known
+func collectFiles(rootPath string, config Config) ([]FileInfo, int64, []string, []FileInfo, error) {
 	var files []FileInfo
 	var totalSize int64
 	var excludedPaths []string
 
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, nil, err
 	}
 
 	err = filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
@@ -193,6 +249,7 @@ func collectFiles(rootPath string, config Config) ([]FileInfo, int64, []string, 
 			return err
 		}
 
+		// Check exclusions - YubiCrypt directory is specially included
 		if shouldExclude(path, relPath, config) {
 			excludedPaths = append(excludedPaths, relPath)
 			return nil
@@ -217,12 +274,19 @@ func collectFiles(rootPath string, config Config) ([]FileInfo, int64, []string, 
 		return nil
 	})
 
+	// Collect YubiCrypt certificate files (these are already included from above walk)
+	// But we also want to track them separately for display
+	yubicryptFiles, err := collectYubiCryptFiles(absRoot)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].Path < files[j].Path
 	})
 
 	sort.Strings(excludedPaths)
-	return files, totalSize, excludedPaths, err
+	return files, totalSize, excludedPaths, yubicryptFiles, err
 }
 
 // Build a Merkle tree from a list of hashes - EXACT SAME AS CLIENT
@@ -269,7 +333,7 @@ func buildMerkleTree(fileHashes []string) string {
 // For backward compatibility
 func NewMerkleTree(fileHashes []string) *MerkleTree {
 	merkleRoot := buildMerkleTree(fileHashes)
-	
+
 	return &MerkleTree{
 		Root: &MerkleNode{
 			Hash: merkleRoot,
@@ -357,8 +421,8 @@ func loadMetadata(inputFile string) (*Metadata, error) {
 // Format time to UTC with Unix timestamp
 func formatTimeUTC(t time.Time) string {
 	utcTime := t.UTC()
-	return fmt.Sprintf("%s (Unix: %d)", 
-		utcTime.Format("2006-01-02 15:04:05 MST"), 
+	return fmt.Sprintf("%s (Unix: %d)",
+		utcTime.Format("2006-01-02 15:04:05 MST"),
 		utcTime.Unix())
 }
 
@@ -385,6 +449,42 @@ func applyDomainBinding(rootHash string, domain string) string {
 	return calculateRIPEMD160([]byte(combined))
 }
 
+// displayYubiCryptInfo shows YubiCrypt certificate information in the terminal
+func displayYubiCryptInfo(yubicryptFiles []FileInfo) {
+	if len(yubicryptFiles) == 0 {
+		return
+	}
+
+	// Count .crt and .ots files
+	crtCount := 0
+	otsCount := 0
+	var crtHashes []string
+	var crtPaths []string
+
+	for _, file := range yubicryptFiles {
+		if strings.HasSuffix(file.Path, ".crt") {
+			crtCount++
+			crtHashes = append(crtHashes, file.Hash)
+			crtPaths = append(crtPaths, file.Path)
+		} else if strings.HasSuffix(file.Path, ".ots") {
+			otsCount++
+		}
+	}
+
+	// Only display if we have .crt files with corresponding .ots files
+	if crtCount > 0 {
+		fmt.Printf("\n%s\n", strings.Repeat("=", 70))
+		fmt.Printf("YUBICRYPT CERTIFICATE VERIFICATION\n")
+		fmt.Printf("%s\n", strings.Repeat("=", 70))
+		fmt.Printf("%d yubicrypt certificate(s) found with respective .ots file(s)\n", crtCount)
+		fmt.Printf("\nRIPEMD-160 hashes:\n")
+		for i, hash := range crtHashes {
+			fmt.Printf("  %d. %s (%s)\n", i+1, hash, crtPaths[i])
+		}
+		fmt.Printf("%s\n", strings.Repeat("=", 70))
+	}
+}
+
 // Main function for "hash" command
 func hashFolder(folderPath string, outputFile string, config Config, domain string) error {
 	absPath, err := filepath.Abs(folderPath)
@@ -398,8 +498,11 @@ func hashFolder(folderPath string, outputFile string, config Config, domain stri
 	}
 	fmt.Printf("Using configuration: %s\n", ConfigFile)
 	fmt.Println("Collecting files and calculating hashes...")
+	fmt.Println("Note: Only .well-known/yubicrypt/ is included from .well-known/")
+	fmt.Println("      Other .well-known/ contents are excluded for security.")
 
-	files, totalSize, excludedPaths, err := collectFiles(absPath, config)
+	// Collect files including YubiCrypt certificates
+	files, totalSize, excludedPaths, yubicryptFiles, err := collectFiles(absPath, config)
 	if err != nil {
 		return fmt.Errorf("failed to collect files: %v", err)
 	}
@@ -411,7 +514,7 @@ func hashFolder(folderPath string, outputFile string, config Config, domain stri
 
 	// Build Merkle tree using EXACT SAME algorithm as client
 	merkleRoot := buildMerkleTree(hashes)
-	
+
 	// Apply domain binding if provided
 	finalRootHash := merkleRoot
 	if domain != "" {
@@ -459,17 +562,34 @@ func hashFolder(folderPath string, outputFile string, config Config, domain stri
 	fmt.Printf("  Algorithm:       %s\n", Algorithm)
 	fmt.Printf("  Metadata saved:  %s\n", outputFile)
 
+	// Display YubiCrypt certificate information
+	displayYubiCryptInfo(yubicryptFiles)
+
 	if len(excludedPaths) > 0 {
-		fmt.Printf("\nExcluded Paths:\n")
-		for _, path := range excludedPaths {
-			fmt.Printf("  %s\n", path)
+		fmt.Printf("\nExcluded Paths (showing first 50):\n")
+		displayCount := len(excludedPaths)
+		if displayCount > 50 {
+			displayCount = 50
+		}
+		for i := 0; i < displayCount; i++ {
+			fmt.Printf("  %s\n", excludedPaths[i])
+		}
+		if len(excludedPaths) > 50 {
+			fmt.Printf("  ... and %d more excluded paths\n", len(excludedPaths)-50)
 		}
 	}
 
 	if len(files) > 0 {
-		fmt.Println("\nFile Hashes (in order used for Merkle tree):")
-		for i, file := range files {
-			fmt.Printf("  %3d. %s: %s\n", i+1, file.Path, file.Hash)
+		fmt.Println("\nFile Hashes (in order used for Merkle tree, showing first 50):")
+		displayCount := len(files)
+		if displayCount > 50 {
+			displayCount = 50
+		}
+		for i := 0; i < displayCount; i++ {
+			fmt.Printf("  %3d. %s: %s\n", i+1, files[i].Path, files[i].Hash)
+		}
+		if len(files) > 50 {
+			fmt.Printf("  ... and %d more files\n", len(files)-50)
 		}
 	}
 
@@ -505,7 +625,7 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 	}
 
 	fmt.Println("Analyzing current folder state...")
-	currentFiles, currentTotalSize, currentExcludedPaths, err := collectFiles(absPath, config)
+	currentFiles, currentTotalSize, currentExcludedPaths, _, err := collectFiles(absPath, config)
 	if err != nil {
 		return fmt.Errorf("failed to collect current files: %v", err)
 	}
@@ -517,7 +637,7 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 
 	// Use EXACT SAME algorithm as client
 	currentMerkleRoot := buildMerkleTree(currentHashes)
-	
+
 	currentRootHash := currentMerkleRoot
 	if domainForVerification != "" {
 		currentRootHash = applyDomainBinding(currentMerkleRoot, domainForVerification)
@@ -557,17 +677,24 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 	fmt.Printf("  Current Size:     %s (included)\n", formatBytes(currentTotalSize))
 
 	if len(currentExcludedPaths) > 0 {
-		fmt.Printf("\nCurrently Excluded Paths (%d):\n", len(currentExcludedPaths))
-		for _, path := range currentExcludedPaths {
-			fmt.Printf("  %s\n", path)
+		fmt.Printf("\nCurrently Excluded Paths (showing first 50):\n")
+		displayCount := len(currentExcludedPaths)
+		if displayCount > 50 {
+			displayCount = 50
+		}
+		for i := 0; i < displayCount; i++ {
+			fmt.Printf("  %s\n", currentExcludedPaths[i])
+		}
+		if len(currentExcludedPaths) > 50 {
+			fmt.Printf("  ... and %d more excluded paths\n", len(currentExcludedPaths)-50)
 		}
 	}
 
 	if len(changes.Added) > 0 {
 		fmt.Printf("\nAdded Files (%d):\n", len(changes.Added))
 		for _, file := range changes.Added {
-			fmt.Printf("  File: %s (Size: %s, Modified: %s)\n", 
-				file.Path, 
+			fmt.Printf("  File: %s (Size: %s, Modified: %s)\n",
+				file.Path,
 				formatBytes(file.Size),
 				formatTimeUTC(file.Modified))
 		}
@@ -583,7 +710,7 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 					break
 				}
 			}
-			
+
 			if originalFile != nil {
 				fmt.Printf("  File: %s\n", file.Path)
 				fmt.Printf("    Original Hash: %s\n", originalFile.Hash)
@@ -611,15 +738,15 @@ func verifyFolder(folderPath string, metadataFile string, config Config, domain 
 	}
 
 	report := map[string]interface{}{
-		"verification_date":    time.Now().UTC().Format(time.RFC3339),
-		"verification_unix":    time.Now().UTC().Unix(),
-		"domain_used":          domainForVerification,
-		"original_metadata":    originalMetadata,
-		"current_merkle_root":  currentMerkleRoot,
-		"current_root_hash":    currentRootHash,
-		"changes":              changes,
-		"root_match":           rootMatch,
-		"config_used":          config,
+		"verification_date":   time.Now().UTC().Format(time.RFC3339),
+		"verification_unix":   time.Now().UTC().Unix(),
+		"domain_used":         domainForVerification,
+		"original_metadata":   originalMetadata,
+		"current_merkle_root": currentMerkleRoot,
+		"current_root_hash":   currentRootHash,
+		"changes":             changes,
+		"root_match":          rootMatch,
+		"config_used":         config,
 	}
 
 	reportJSON, _ := json.MarshalIndent(report, "", "  ")
@@ -640,7 +767,9 @@ func main() {
 		fmt.Println("  mfv verify <folder> [--domain example.com]  - Verify folder against saved state")
 		fmt.Println("  mfv config                                  - Show current configuration")
 		fmt.Println("\nConfiguration file:", ConfigFile)
-		fmt.Println("Default exclusions: .well-known/, .git/, *.tmp, *.log, etc.")
+		fmt.Println("Default exclusions: .well-known/* (EXCEPT .well-known/yubicrypt/), .git/, *.tmp, *.log, etc.")
+		fmt.Println("Security Note: Only YubiCrypt certificates from .well-known/yubicrypt/ are included")
+		fmt.Println("              All other .well-known/ contents are excluded for security")
 		fmt.Println("\nExamples:")
 		fmt.Println("  mfv hash ./html_root --domain example.com")
 		fmt.Println("  mfv verify ./html_root --domain example.com")
@@ -650,18 +779,18 @@ func main() {
 	}
 
 	command := os.Args[1]
-	
+
 	if command == "config" {
 		config, err := loadConfig(ConfigFile)
 		if err != nil {
 			fmt.Printf("Error loading config: %v\n", err)
 			os.Exit(1)
 		}
-		
+
 		configJSON, _ := json.MarshalIndent(config, "", "  ")
 		fmt.Println("Current configuration:")
 		fmt.Println(string(configJSON))
-		
+
 		fmt.Println("\nDefault exclusions:")
 		for _, pattern := range defaultConfig.ExcludePatterns {
 			fmt.Printf("  Pattern: %s\n", pattern)
@@ -669,14 +798,15 @@ func main() {
 		for _, path := range defaultConfig.ExcludePaths {
 			fmt.Printf("  Path: %s\n", path)
 		}
+		fmt.Println("\nSpecial Rule: .well-known/yubicrypt/ is ALWAYS included regardless of exclusions")
 		os.Exit(0)
 	}
-	
+
 	if len(os.Args) < 3 {
 		fmt.Printf("Error: Folder path required for command '%s'\n", command)
 		os.Exit(1)
 	}
-	
+
 	folderPath := os.Args[2]
 
 	if _, err := os.Stat(folderPath); os.IsNotExist(err) {
@@ -693,7 +823,7 @@ func main() {
 
 	metadataFile := MetadataFile
 	domain := ""
-	
+
 	for i := 3; i < len(os.Args); i++ {
 		if os.Args[i] == "--domain" && i+1 < len(os.Args) {
 			domain = os.Args[i+1]

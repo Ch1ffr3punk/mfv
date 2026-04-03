@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -32,7 +33,7 @@ type Metadata struct {
 	FolderPath    string     `json:"folder_path"`
 	CreatedAt     time.Time  `json:"created_at"`
 	FileCount     int        `json:"file_count"`
-	TotalSize     int64     `json:"total_size"`
+	TotalSize     int64      `json:"total_size"`
 	Files         []FileInfo `json:"files"`
 	Algorithm     string     `json:"algorithm"`
 	Version       string     `json:"version"`
@@ -51,12 +52,12 @@ type ChangeResult struct {
 
 // DNSRecord stores DNS-based hash information
 type DNSRecord struct {
-	Hash           string    `json:"hash"`
-	Timestamp      time.Time `json:"timestamp"`
-	Source         string    `json:"source"`
-	Valid          bool      `json:"valid"`
-	ExcludedPaths  []string  `json:"excluded_paths,omitempty"`
-	ExcludedCount  int       `json:"excluded_count,omitempty"`
+	Hash          string    `json:"hash"`
+	Timestamp     time.Time `json:"timestamp"`
+	Source        string    `json:"source"`
+	Valid         bool      `json:"valid"`
+	ExcludedPaths []string  `json:"excluded_paths,omitempty"`
+	ExcludedCount int       `json:"excluded_count,omitempty"`
 }
 
 // VerificationResult stores complete verification results
@@ -82,18 +83,20 @@ type VerificationResult struct {
 
 // DownloadResult stores download operation results
 type DownloadResult struct {
-	Success       bool      `json:"success"`
-	Timestamp     time.Time `json:"timestamp"`
-	Files         []string  `json:"files"`
-	TotalSize     int64     `json:"total_size"`
-	ErrorMessages []string  `json:"error_messages,omitempty"`
+	Success        bool      `json:"success"`
+	Timestamp      time.Time `json:"timestamp"`
+	Files          []string  `json:"files"`
+	yubicryptFiles []string  `json:"yubicrypt_files,omitempty"`
+	TotalSize      int64     `json:"total_size"`
+	ErrorMessages  []string  `json:"error_messages,omitempty"`
 }
 
 // Constants
 const (
-	Version   = "0.4.1"
-	Algorithm = "RIPEMD-160"
-	TorProxy  = "127.0.0.1:9050"
+	Version      = "0.4.3"
+	Algorithm    = "RIPEMD-160"
+	TorProxy     = "127.0.0.1:9050"
+	yubicryptDir = ".well-known/yubicrypt"
 )
 
 // Helper function to check if string is hex
@@ -130,75 +133,158 @@ func createHTTPClient(useTor bool) (*http.Client, error) {
 		}, nil
 	}
 
-	// Create SOCKS5 dialer for Tor
 	dialer, err := proxy.SOCKS5("tcp", TorProxy, nil, proxy.Direct)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Tor dialer: %v", err)
 	}
 
-	// Create HTTP transport with Tor dialer
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return dialer.Dial(network, addr)
 		},
-		DisableKeepAlives: true, // Better for Tor
+		DisableKeepAlives: true,
 	}
 
 	return &http.Client{
 		Transport: transport,
-		Timeout:   60 * time.Second, // Longer timeout for Tor
+		Timeout:   60 * time.Second,
 	}, nil
 }
 
 // Download file from URL with optional Tor
-func downloadFile(url string, filepath string, useTor bool) error {
+func downloadFile(url string, filepathStr string, useTor bool) error {
 	client, err := createHTTPClient(useTor)
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP client: %v", err)
 	}
 
-	// Create the file
-	out, err := os.Create(filepath)
+	// Create directory if it doesn't exist
+	dir := filepath.Dir(filepathStr)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %v", dir, err)
+	}
+
+	out, err := os.Create(filepathStr)
 	if err != nil {
-		return fmt.Errorf("failed to create file %s: %v", filepath, err)
+		return fmt.Errorf("failed to create file %s: %v", filepathStr, err)
 	}
 	defer out.Close()
 
-	// Get the data
 	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("failed to download %s: %v", url, err)
 	}
 	defer resp.Body.Close()
 
-	// Check server response
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad status: %s for %s", resp.Status, url)
 	}
 
-	// Write the body to file
 	_, err = io.Copy(out, resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to write file %s: %v", filepath, err)
+		return fmt.Errorf("failed to write file %s: %v", filepathStr, err)
 	}
 
 	return nil
 }
 
-// Download proof files from server with optional Tor
-func downloadProofs(serverURL string, useTor bool) *DownloadResult {
+// Load local metadata from JSON file
+func loadLocalMetadata(filename string) (*Metadata, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	var metadata Metadata
+	err = json.Unmarshal(data, &metadata)
+	if err != nil {
+		return nil, err
+	}
+
+	return &metadata, nil
+}
+
+// Download yubicrypt certificate files (.crt and .ots)
+func downloadyubicryptFiles(serverURL string, metadata *Metadata, useTor bool) *DownloadResult {
 	result := &DownloadResult{
-		Success:       false,
-		Timestamp:     time.Now().UTC(),
-		Files:         []string{},
-		ErrorMessages: []string{},
+		Success:        false,
+		Timestamp:      time.Now().UTC(),
+		Files:          []string{},
+		yubicryptFiles: []string{},
+		ErrorMessages:  []string{},
+	}
+
+	// Create yubicrypt directory
+	yubicryptLocalDir := strings.ReplaceAll(yubicryptDir, "/", string(os.PathSeparator))
+	if err := os.MkdirAll(yubicryptLocalDir, 0755); err != nil {
+		result.ErrorMessages = append(result.ErrorMessages, fmt.Sprintf("Failed to create directory %s: %v", yubicryptLocalDir, err))
+		return result
+	}
+
+	var totalSize int64
+	var downloadedCount int
+
+	for _, fileInfo := range metadata.Files {
+		// Only download yubicrypt files
+		if !isyubicryptFile(fileInfo.Path) {
+			continue
+		}
+
+		fileURL := fmt.Sprintf("%s/%s", strings.TrimSuffix(serverURL, "/"), fileInfo.Path)
+
+		// Create local path
+		localPath := strings.ReplaceAll(fileInfo.Path, "/", string(os.PathSeparator))
+
+		fmt.Printf("Downloading yubicrypt: %s ... ", fileInfo.Path)
+
+		if err := downloadFile(fileURL, localPath, useTor); err != nil {
+			fmt.Printf("✗\n")
+			result.ErrorMessages = append(result.ErrorMessages,
+				fmt.Sprintf("Failed to download %s: %v", fileInfo.Path, err))
+		} else {
+			if info, err := os.Stat(localPath); err == nil {
+				totalSize += info.Size()
+			}
+			result.yubicryptFiles = append(result.yubicryptFiles, fileInfo.Path)
+			result.Files = append(result.Files, fileInfo.Path)
+			downloadedCount++
+			fmt.Printf("✓\n")
+		}
+	}
+
+	result.TotalSize = totalSize
+	result.Success = downloadedCount > 0
+
+	if result.Success {
+		fmt.Printf("\nyubicrypt Download Summary:\n")
+		fmt.Printf("  Files downloaded: %d\n", downloadedCount)
+		fmt.Printf("  Total size:       %s\n", formatBytes(totalSize))
+		if len(result.yubicryptFiles) > 0 {
+			fmt.Printf("  Downloaded files:\n")
+			for _, file := range result.yubicryptFiles {
+				fmt.Printf("    • %s\n", file)
+			}
+		}
+	}
+
+	return result
+}
+
+// Download proof files from server with optional Tor and yubicrypt support
+func downloadProofs(serverURL string, useTor bool, downloadyubicrypt bool) *DownloadResult {
+	result := &DownloadResult{
+		Success:        false,
+		Timestamp:      time.Now().UTC(),
+		Files:          []string{},
+		yubicryptFiles: []string{},
+		ErrorMessages:  []string{},
 	}
 
 	mode := "normal"
 	if useTor {
 		mode = "Tor"
 	}
-	
+
 	fmt.Println(strings.Repeat("=", 70))
 	fmt.Printf("DOWNLOADING PROOF FILES (Mode: %s)\n", mode)
 	fmt.Println(strings.Repeat("=", 70))
@@ -208,6 +294,7 @@ func downloadProofs(serverURL string, useTor bool) *DownloadResult {
 	}
 	fmt.Println()
 
+	// First download metadata to know which yubicrypt files exist
 	filesToDownload := []struct {
 		remotePath string
 		localName  string
@@ -226,6 +313,7 @@ func downloadProofs(serverURL string, useTor bool) *DownloadResult {
 	successCount := 0
 	var totalSize int64
 
+	// Download proof files
 	for _, file := range filesToDownload {
 		alreadyDownloaded := false
 		for _, downloaded := range result.Files {
@@ -239,7 +327,7 @@ func downloadProofs(serverURL string, useTor bool) *DownloadResult {
 		}
 
 		url := fmt.Sprintf("%s/%s", strings.TrimSuffix(serverURL, "/"), file.remotePath)
-		
+
 		fmt.Printf("Trying: %s ... ", url)
 
 		if err := downloadFile(url, file.localName, useTor); err == nil {
@@ -255,48 +343,74 @@ func downloadProofs(serverURL string, useTor bool) *DownloadResult {
 				fmt.Printf("✗ (optional)\n")
 			} else {
 				fmt.Printf("✗\n")
-				result.ErrorMessages = append(result.ErrorMessages, 
+				result.ErrorMessages = append(result.ErrorMessages,
 					fmt.Sprintf("Failed to download %s: %v", file.remotePath, err))
 			}
 		}
 	}
 
 	result.TotalSize = totalSize
-	
-	// Success if we got at least the metadata file
+
+	// Check if metadata was successfully downloaded
+	metadataDownloaded := false
 	for _, file := range result.Files {
 		if file == "merkle_metadata.json" {
+			metadataDownloaded = true
 			result.Success = true
 			break
 		}
 	}
 
 	fmt.Println(strings.Repeat("-", 70))
-	fmt.Printf("Download Summary:\n")
-	fmt.Printf("  Mode:            %s\n", mode)
+	fmt.Printf("Proof Files Summary:\n")
+	fmt.Printf("  Mode:             %s\n", mode)
 	fmt.Printf("  Files downloaded: %d\n", successCount)
-	fmt.Printf("  Total size:      %s\n", formatBytes(totalSize))
-	
+	fmt.Printf("  Total size:       %s\n", formatBytes(totalSize))
+
 	if len(result.Files) > 0 {
 		fmt.Printf("  Downloaded files:\n")
 		for _, file := range result.Files {
 			fmt.Printf("    • %s\n", file)
 		}
 	}
-	
+
+	// Download yubicrypt files if requested and metadata is available
+	if downloadyubicrypt && metadataDownloaded {
+		fmt.Println("\n" + strings.Repeat("=", 70))
+		fmt.Println("DOWNLOADING yubicrypt CERTIFICATES")
+		fmt.Println(strings.Repeat("=", 70))
+
+		metadata, err := loadLocalMetadata("merkle_metadata.json")
+		if err != nil {
+			fmt.Printf("Warning: Could not load metadata for yubicrypt download: %v\n", err)
+			result.ErrorMessages = append(result.ErrorMessages,
+				fmt.Sprintf("Failed to load metadata for yubicrypt: %v", err))
+		} else {
+			yubiResult := downloadyubicryptFiles(serverURL, metadata, useTor)
+			result.yubicryptFiles = yubiResult.yubicryptFiles
+			result.Files = append(result.Files, yubiResult.yubicryptFiles...)
+			result.TotalSize += yubiResult.TotalSize
+			result.ErrorMessages = append(result.ErrorMessages, yubiResult.ErrorMessages...)
+
+			if len(yubiResult.yubicryptFiles) > 0 {
+				fmt.Printf("\n  yubicrypt files downloaded: %d\n", len(yubiResult.yubicryptFiles))
+			}
+		}
+	}
+
 	if len(result.ErrorMessages) > 0 {
-		fmt.Printf("  Errors:\n")
+		fmt.Printf("\n  Errors:\n")
 		for _, err := range result.ErrorMessages {
 			fmt.Printf("    • %s\n", err)
 		}
 	}
-	
+
 	if !result.Success {
-		fmt.Printf("      Warning: Could not download merkle_metadata.json\n")
+		fmt.Printf("\n      Warning: Could not download merkle_metadata.json\n")
 		fmt.Printf("     The server may not have proof files configured.\n")
 	}
 
-	fmt.Println(strings.Repeat("=", 70))
+	// fmt.Println(strings.Repeat("=", 70))
 	return result
 }
 
@@ -316,7 +430,7 @@ func fetchMetadata(serverURL string, useTor bool) (*Metadata, error) {
 	var lastError error
 	for _, path := range possiblePaths {
 		url := fmt.Sprintf("%s/%s", strings.TrimSuffix(serverURL, "/"), path)
-		
+
 		resp, err := client.Get(url)
 		if err != nil {
 			lastError = err
@@ -336,38 +450,45 @@ func fetchMetadata(serverURL string, useTor bool) (*Metadata, error) {
 	return nil, fmt.Errorf("metadata not found. Last error: %v", lastError)
 }
 
+// Check if a path is a yubicrypt file
+func isyubicryptFile(path string) bool {
+	return strings.Contains(path, yubicryptDir) &&
+		(strings.HasSuffix(path, ".crt") || strings.HasSuffix(path, ".ots"))
+}
+
 // Collect all files from remote server with optional Tor
-func collectRemoteFiles(serverURL string, metadata *Metadata, useTor bool) ([]FileInfo, int64, error) {
+func collectRemoteFiles(serverURL string, metadata *Metadata, useTor bool) ([]FileInfo, []FileInfo, int64, error) {
 	client, err := createHTTPClient(useTor)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 
-	var files []FileInfo
+	var allFiles []FileInfo
 	var totalSize int64
 
 	for _, fileInfo := range metadata.Files {
 		fileURL := fmt.Sprintf("%s/%s", strings.TrimSuffix(serverURL, "/"), fileInfo.Path)
-		
+
 		resp, err := client.Get(fileURL)
 		if err != nil {
 			fmt.Printf("Warning: Could not fetch %s: %v\n", fileInfo.Path, err)
 			continue
 		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
 			fmt.Printf("Warning: File %s returned status %d\n", fileInfo.Path, resp.StatusCode)
 			continue
 		}
 
 		content, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to read %s: %v", fileInfo.Path, err)
+			return nil, nil, 0, fmt.Errorf("failed to read %s: %v", fileInfo.Path, err)
 		}
 
 		hash := calculateRIPEMD160(content)
-		
+
 		size := resp.ContentLength
 		if size == -1 {
 			size = int64(len(content))
@@ -395,15 +516,23 @@ func collectRemoteFiles(serverURL string, metadata *Metadata, useTor bool) ([]Fi
 			Permissions: "-rw-r--r--",
 		}
 
-		files = append(files, file)
+		allFiles = append(allFiles, file)
 		totalSize += size
 	}
 
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Path < files[j].Path
+	var yubicryptFiles []FileInfo
+	for _, file := range allFiles {
+		if isyubicryptFile(file.Path) {
+			yubicryptFiles = append(yubicryptFiles, file)
+		}
+	}
+
+	// Sort all files by path - CRITICAL for Merkle tree calculation
+	sort.Slice(allFiles, func(i, j int) bool {
+		return allFiles[i].Path < allFiles[j].Path
 	})
 
-	return files, totalSize, nil
+	return allFiles, yubicryptFiles, totalSize, nil
 }
 
 // Build a Merkle tree from a list of hashes
@@ -412,10 +541,8 @@ func buildMerkleTree(fileHashes []string) string {
 		return calculateRIPEMD160([]byte(""))
 	}
 
-	var nodes []string
-	for _, hash := range fileHashes {
-		nodes = append(nodes, hash)
-	}
+	nodes := make([]string, len(fileHashes))
+	copy(nodes, fileHashes)
 
 	if len(nodes)%2 == 1 {
 		nodes = append(nodes, nodes[len(nodes)-1])
@@ -508,17 +635,14 @@ func queryDNSHash(domain string, useTor bool) (*DNSRecord, error) {
 		"_integrity." + domain,
 	}
 
-	// Create resolver with or without Tor
 	var resolver *net.Resolver
-	
+
 	if useTor {
-		// Create SOCKS5 dialer for Tor
 		dialer, err := proxy.SOCKS5("tcp", TorProxy, nil, proxy.Direct)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Tor dialer for DNS: %v", err)
 		}
-		
-		// Create custom resolver that uses Tor
+
 		resolver = &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -530,26 +654,26 @@ func queryDNSHash(domain string, useTor bool) (*DNSRecord, error) {
 	for _, d := range attempts {
 		var txtRecords []string
 		var err error
-		
+
 		if useTor && resolver != nil {
 			txtRecords, err = resolver.LookupTXT(context.Background(), d)
 		} else {
 			txtRecords, err = net.LookupTXT(d)
 		}
-		
+
 		if err != nil {
 			continue
 		}
 
 		for _, record := range txtRecords {
 			cleanRecord := strings.Trim(record, "\"")
-			
+
 			if strings.HasPrefix(cleanRecord, "{") {
 				var dnsData map[string]interface{}
 				if err := json.Unmarshal([]byte(cleanRecord), &dnsData); err == nil {
 					hash, hashOK := dnsData["hash"].(string)
 					excluded, excludedOK := dnsData["excluded_paths"].([]interface{})
-					
+
 					if hashOK && isHex(hash) && len(hash) == 40 {
 						dnsRecord := &DNSRecord{
 							Hash:      hash,
@@ -557,7 +681,7 @@ func queryDNSHash(domain string, useTor bool) (*DNSRecord, error) {
 							Source:    "dns_json",
 							Valid:     true,
 						}
-						
+
 						if excludedOK {
 							var excludedPaths []string
 							for _, path := range excluded {
@@ -568,7 +692,7 @@ func queryDNSHash(domain string, useTor bool) (*DNSRecord, error) {
 							dnsRecord.ExcludedPaths = excludedPaths
 							dnsRecord.ExcludedCount = len(excludedPaths)
 						}
-						
+
 						return dnsRecord, nil
 					}
 				}
@@ -598,7 +722,6 @@ func queryDNSHash(domain string, useTor bool) (*DNSRecord, error) {
 				}
 			}
 
-			// Plain hash
 			if len(cleanRecord) == 40 && isHex(cleanRecord) {
 				return &DNSRecord{
 					Hash:      cleanRecord,
@@ -631,8 +754,8 @@ func extractDomain(url string) string {
 // Format time to UTC with Unix timestamp
 func formatTimeUTC(t time.Time) string {
 	utcTime := t.UTC()
-	return fmt.Sprintf("%s (Unix ET: %d)", 
-		utcTime.Format("2006-01-02 15:04:05 MST"), 
+	return fmt.Sprintf("%s (Unix ET: %d)",
+		utcTime.Format("2006-01-02 15:04:05 MST"),
 		utcTime.Unix())
 }
 
@@ -650,29 +773,63 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
+// Display yubicrypt certificate information
+func displayyubicryptInfo(yubicryptFiles []FileInfo) {
+	if len(yubicryptFiles) == 0 {
+		return
+	}
+
+	crtCount := 0
+	otsCount := 0
+	var crtHashes []string
+	var crtPaths []string
+
+	for _, file := range yubicryptFiles {
+		if strings.HasSuffix(file.Path, ".crt") {
+			crtCount++
+			crtHashes = append(crtHashes, file.Hash)
+			crtPaths = append(crtPaths, file.Path)
+		} else if strings.HasSuffix(file.Path, ".ots") {
+			otsCount++
+		}
+	}
+
+	if crtCount > 0 && otsCount > 0 {
+		fmt.Printf("\n%s\n", strings.Repeat("=", 70))
+		fmt.Printf("yubicrypt CERTIFICATE VERIFICATION\n")
+		fmt.Printf("%s\n", strings.Repeat("=", 70))
+		fmt.Printf("%d yubicrypt certificate(s) found with respective .ots file(s)\n", crtCount)
+		fmt.Printf("\nRIPEMD-160 hashes:\n")
+		for i, hash := range crtHashes {
+			fmt.Printf("  %d. %s (%s)\n", i+1, hash, crtPaths[i])
+		}
+		fmt.Printf("%s\n", strings.Repeat("=", 70))
+	}
+}
+
 // Display verification results
 func displayResults(result *VerificationResult) {
 	fmt.Println(strings.Repeat("=", 70))
-	
+
 	if result.ContentTheft {
-		fmt.Println("   CONTENT THEFT DETECTED - VERIFICATION FAILED   ")
+		fmt.Println("CONTENT THEFT DETECTED - VERIFICATION FAILED   ")
 	} else if !result.Success {
-		fmt.Println("   VERIFICATION FAILED   ")
+		fmt.Println("VERIFICATION FAILED   ")
 	} else {
-		fmt.Println("   VERIFICATION SUCCESSFUL   ")
+		fmt.Println("VERIFICATION SUCCESSFUL   ")
 	}
-	
+
 	fmt.Println(strings.Repeat("=", 70))
 
-	fmt.Printf("Server URL:       %s\n", result.ServerURL)
+	fmt.Printf("Server URL:        %s\n", result.ServerURL)
 	fmt.Printf("Verification Date: %s\n", formatTimeUTC(result.VerificationDate))
-	fmt.Printf("URL Domain:       %s\n", result.URLDomain)
+	fmt.Printf("URL Domain:        %s\n", result.URLDomain)
 	if result.MetadataDomain != "" {
-		fmt.Printf("Metadata Domain:  %s\n", result.MetadataDomain)
+		fmt.Printf("Metadata Domain:   %s\n", result.MetadataDomain)
 	}
-	
+
 	if result.OriginalMetadata != nil && len(result.OriginalMetadata.ExcludedPaths) > 0 {
-		fmt.Printf("Excluded Files:   %d\n", len(result.OriginalMetadata.ExcludedPaths))
+		fmt.Printf("Excluded Files:    %d\n", len(result.OriginalMetadata.ExcludedPaths))
 	}
 	fmt.Println()
 
@@ -710,13 +867,13 @@ func displayResults(result *VerificationResult) {
 	fmt.Printf("  URL Domain:             %s\n", result.URLDomain)
 	if result.MetadataDomain != "" {
 		fmt.Printf("  Metadata Domain:        %s\n", result.MetadataDomain)
-		
+
 		if result.URLDomain != result.MetadataDomain {
-			fmt.Printf("      DOMAIN MISMATCH:     %s != %s\n", 
+			fmt.Printf("  DOMAIN MISMATCH:     %s != %s\n",
 				result.URLDomain, result.MetadataDomain)
-			fmt.Printf("     SECURITY VIOLATION: Domain binding mismatch\n")
+			fmt.Printf("  SECURITY VIOLATION: Domain binding mismatch\n")
 		} else {
-			fmt.Printf("     Domain Match:        Perfect\n")
+			fmt.Printf("  Domain Match:           Perfect\n")
 		}
 	} else {
 		fmt.Printf("  Metadata Domain:        (not specified - legacy)\n")
@@ -728,55 +885,55 @@ func displayResults(result *VerificationResult) {
 	fmt.Println(strings.Repeat("-", 70))
 	fmt.Printf("  Original Root Hash:     %s\n", result.OriginalMetadata.RootHash)
 	fmt.Printf("  Calculated Merkle Root: %s\n", result.CalculatedRoot)
-	fmt.Printf("  Calculated Final Hash:  %s (with domain: %s)\n", 
+	fmt.Printf("  Calculated Final Hash:  %s (with domain: %s)\n",
 		result.CalculatedHash, result.URLDomain)
-	
+
 	if result.MetadataDomain != "" && result.MetadataDomain != result.URLDomain {
 		hashWithMeta := applyDomainBinding(result.CalculatedRoot, result.MetadataDomain)
 		fmt.Printf("  Hash with Meta Domain: %s (for comparison)\n", hashWithMeta)
-		
+
 		if result.OriginalMetadata.RootHash == hashWithMeta {
-			fmt.Printf("      WARNING: Hash matches metadata domain '%s'\n", 
+			fmt.Printf("      WARNING: Hash matches metadata domain '%s'\n",
 				result.MetadataDomain)
-			fmt.Printf("     This indicates the content was copied from '%s'\n", 
+			fmt.Printf("     This indicates the content was copied from '%s'\n",
 				result.MetadataDomain)
 			result.ContentTheft = true
 		}
 	}
-	
+
 	fmt.Printf("  Root Hash Match:        %v\n", result.RootMatch)
-	
+
 	if !result.RootMatch && result.MetadataDomain != "" && result.URLDomain != result.MetadataDomain {
 		fmt.Printf("      Expected behavior: Hash should not match across domains\n")
 		fmt.Printf("     Domain binding is working correctly to prevent copying\n")
 	}
-	
+
 	fmt.Printf("  Metadata Created:       %s\n", formatTimeUTC(result.OriginalMetadata.CreatedAt))
 	fmt.Printf("  Original File Count:    %d (included)\n", len(result.OriginalMetadata.Files))
 	fmt.Printf("  Current File Count:     %d (included)\n", len(result.CurrentFiles))
-	
+
 	if len(result.OriginalMetadata.ExcludedPaths) > 0 {
-		fmt.Printf("  Excluded Paths:         %d (not verified)\n", 
+		fmt.Printf("  Excluded Paths:         %d (not verified)\n",
 			len(result.OriginalMetadata.ExcludedPaths))
 	}
-	
-	fmt.Printf("  Original Total Size:    %s\n", 
+
+	fmt.Printf("  Original Total Size:    %s\n",
 		formatBytes(result.OriginalMetadata.TotalSize))
-	fmt.Printf("  Current Total Size:     %s\n", 
+	fmt.Printf("  Current Total Size:     %s\n",
 		formatBytes(getTotalSize(result.CurrentFiles)))
 	fmt.Println()
 
 	if result.DNSRecord != nil {
 		fmt.Println("DNS VERIFICATION:")
 		fmt.Println(strings.Repeat("-", 70))
-		fmt.Printf("  DNS Hash:              %s\n", result.DNSRecord.Hash)
-		fmt.Printf("  DNS Source:            %s\n", result.DNSRecord.Source)
-		fmt.Printf("  DNS Query Time:        %s\n", formatTimeUTC(result.DNSRecord.Timestamp))
-		fmt.Printf("  DNS Hash Valid:        %v\n", result.DNSRecord.Valid)
+		fmt.Printf("  DNS Hash:               %s\n", result.DNSRecord.Hash)
+		fmt.Printf("  DNS Source:             %s\n", result.DNSRecord.Source)
+		fmt.Printf("  DNS Query Time:         %s\n", formatTimeUTC(result.DNSRecord.Timestamp))
+		fmt.Printf("  DNS Hash Valid:         %v\n", result.DNSRecord.Valid)
 		if result.DNSRecord.ExcludedCount > 0 {
 			fmt.Printf("  DNS Excluded Count:    %d files\n", result.DNSRecord.ExcludedCount)
 		}
-		fmt.Printf("  DNS Hash Match:        %v\n", result.DNSMatch)
+		fmt.Printf("  DNS Hash Match:         %v\n", result.DNSMatch)
 		if !result.DNSMatch {
 			fmt.Printf("      DNS WARNING: Hash does not match!\n")
 		}
@@ -816,14 +973,15 @@ func displayResults(result *VerificationResult) {
 
 	fmt.Println(strings.Repeat("=", 70))
 	if result.ContentTheft {
-		fmt.Println("   FINAL VERDICT: CONTENT THEFT - VERIFICATION REJECTED   ")
-		fmt.Println("   The website appears to be a copy of another domain.")
-		fmt.Println("   This violates the domain binding security principle.")
+		fmt.Println("  FINAL VERDICT: CONTENT THEFT - VERIFICATION REJECTED   ")
+		fmt.Println("  The website appears to be a copy of another domain.")
+		fmt.Println("  This violates the domain binding security principle.")
 	} else if result.Success && result.RootMatch {
-		fmt.Println("   FINAL VERDICT: VERIFICATION SUCCESSFUL   ")
-		fmt.Println("   All files are intact and domain binding is correct.")
+		fmt.Println("  FINAL VERDICT: VERIFICATION SUCCESSFUL   ")
+		fmt.Println("  All files are intact and domain binding is correct.")
+		fmt.Println("  yubicrypt certificates are included in the integrity check.")
 	} else if result.Success && !result.RootMatch {
-		fmt.Println("    FINAL VERDICT: CONTENT MODIFIED   ")
+		fmt.Println("   FINAL VERDICT: CONTENT MODIFIED   ")
 		fmt.Println("   Some files have been added, modified, or deleted.")
 	} else {
 		fmt.Println("   FINAL VERDICT: VERIFICATION FAILED   ")
@@ -843,7 +1001,7 @@ func getTotalSize(files []FileInfo) int64 {
 // Main verification function with Tor support
 func verifyRemote(serverURL string, useDNS bool, useTor bool) *VerificationResult {
 	urlDomain := extractDomain(serverURL)
-	
+
 	result := &VerificationResult{
 		ServerURL:        serverURL,
 		URLDomain:        urlDomain,
@@ -856,10 +1014,12 @@ func verifyRemote(serverURL string, useDNS bool, useTor bool) *VerificationResul
 	if useTor {
 		mode = "Tor"
 	}
-	
+
 	fmt.Printf("Starting STRICT verification of: %s (Mode: %s)\n", serverURL, mode)
 	fmt.Printf("URL Domain: %s\n", urlDomain)
 	fmt.Println("STRICT MODE: No domain migration allowed")
+	fmt.Println("SECURITY NOTE: Only .well-known/yubicrypt/ is verified from .well-known/")
+	fmt.Println("               All other .well-known/ contents are excluded for security")
 	fmt.Println(strings.Repeat("-", 70))
 
 	if useDNS {
@@ -882,16 +1042,16 @@ func verifyRemote(serverURL string, useDNS bool, useTor bool) *VerificationResul
 	result.OriginalMetadata = metadata
 	result.MetadataDomain = metadata.Domain
 
-	fmt.Printf("Metadata found. Created: %s\n", formatTimeUTC(metadata.CreatedAt))
-	fmt.Printf("Original file count: %d (included)\n", metadata.FileCount)
-	
+	fmt.Printf("Metadata found.          Created: %s\n", formatTimeUTC(metadata.CreatedAt))
+	fmt.Printf("Original file count:     %d (included)\n", metadata.FileCount)
+
 	if metadata.Domain != "" {
-		fmt.Printf("Metadata domain: %s\n", metadata.Domain)
-		
+		fmt.Printf("Metadata domain:         %s\n", metadata.Domain)
+
 		if urlDomain != metadata.Domain {
 			result.SecurityWarning = fmt.Sprintf(
-				"DOMAIN MISMATCH: URL '%s' ≠ Metadata '%s'. " +
-				"This indicates potential content theft.", 
+				"DOMAIN MISMATCH: URL '%s' ≠ Metadata '%s'. "+
+					"This indicates potential content theft.",
 				urlDomain, metadata.Domain)
 			fmt.Printf("   SECURITY ALERT: %s\n", result.SecurityWarning)
 		}
@@ -899,56 +1059,58 @@ func verifyRemote(serverURL string, useDNS bool, useTor bool) *VerificationResul
 		fmt.Printf("No domain specified in metadata (legacy/unsafe format)\n")
 		result.SecurityWarning = "No domain binding in metadata - legacy format"
 	}
-	
+
 	if len(metadata.ExcludedPaths) > 0 {
-		fmt.Printf("Excluded files: %d\n", len(metadata.ExcludedPaths))
-		result.ExcludedInfo = fmt.Sprintf("%d files excluded from verification", 
+		fmt.Printf("Excluded files:          %d\n", len(metadata.ExcludedPaths))
+		result.ExcludedInfo = fmt.Sprintf("%d files excluded from verification (including most .well-known/)",
 			len(metadata.ExcludedPaths))
 	}
 
 	fmt.Println("\nCollecting current files from server...")
-	currentFiles, _, err := collectRemoteFiles(serverURL, metadata, useTor)
+	allFiles, yubicryptFiles, _, err := collectRemoteFiles(serverURL, metadata, useTor)
 	if err != nil {
 		result.ErrorMessage = fmt.Sprintf("Failed to collect files: %v", err)
 		return result
 	}
-	result.CurrentFiles = currentFiles
+
+	result.CurrentFiles = allFiles
+
+	displayyubicryptInfo(yubicryptFiles)
 
 	fmt.Println("Calculating hashes and Merkle root...")
 	var currentHashes []string
-	for _, file := range currentFiles {
+	for _, file := range allFiles {
 		currentHashes = append(currentHashes, file.Hash)
 	}
-	
+
 	merkleRoot := buildMerkleTree(currentHashes)
 	result.CalculatedRoot = merkleRoot
-	
+
 	fmt.Println("\nPerforming STRICT hash verification...")
-	
+
 	calculatedHash := applyDomainBinding(merkleRoot, urlDomain)
 	result.CalculatedHash = calculatedHash
-	
+
 	result.RootMatch = (metadata.RootHash == calculatedHash)
-	
-	// CONTENT THEFT DETECTION
+
 	if metadata.Domain != "" && urlDomain != metadata.Domain {
 		hashWithMetaDomain := applyDomainBinding(merkleRoot, metadata.Domain)
-		
+
 		if metadata.RootHash == hashWithMetaDomain {
 			result.ContentTheft = true
 			result.SecurityWarning = fmt.Sprintf(
-				"CONTENT THEFT DETECTED: This site appears to be a copy of '%s'", 
+				"CONTENT THEFT DETECTED: This site appears to be a copy of '%s'",
 				metadata.Domain)
-			fmt.Printf("   CONTENT THEFT: Hash matches original domain '%s'\n", 
+			fmt.Printf("   CONTENT THEFT: Hash matches original domain '%s'\n",
 				metadata.Domain)
 			fmt.Printf("   This violates domain binding security principle\n")
 		}
 	}
 
-	result.Changes = compareFiles(metadata.Files, currentFiles)
+	result.Changes = compareFiles(metadata.Files, allFiles)
 
-	if result.RootMatch && len(result.Changes.Added) == 0 && 
-	   len(result.Changes.Modified) == 0 && len(result.Changes.Deleted) == 0 {
+	if result.RootMatch && len(result.Changes.Added) == 0 &&
+		len(result.Changes.Modified) == 0 && len(result.Changes.Deleted) == 0 {
 		result.Changes.Message = "All files unchanged and domain binding correct."
 	} else if result.ContentTheft {
 		result.Changes.Message = "CONTENT THEFT DETECTED - Site appears to be a copy."
@@ -958,23 +1120,22 @@ func verifyRemote(serverURL string, useDNS bool, useTor bool) *VerificationResul
 
 	if result.DNSRecord != nil {
 		dnsMatches := result.DNSRecord.Hash == calculatedHash
-		
+
 		if metadata.Domain != "" && urlDomain != metadata.Domain {
 			hashWithMeta := applyDomainBinding(merkleRoot, metadata.Domain)
 			if result.DNSRecord.Hash == hashWithMeta {
-				fmt.Printf("    DNS Warning: DNS hash matches original domain '%s'\n", 
+				fmt.Printf("    DNS Warning: DNS hash matches original domain '%s'\n",
 					metadata.Domain)
 			}
 		}
-		
+
 		result.DNSMatch = dnsMatches
-		
+
 		if !dnsMatches {
 			result.SecurityWarning = "DNS hash does not match calculated hash"
 		}
 	}
 
-	// FINAL SUCCESS DETERMINATION
 	if result.RootMatch && !result.ContentTheft {
 		result.Success = true
 	} else {
@@ -987,8 +1148,8 @@ func verifyRemote(serverURL string, useDNS bool, useTor bool) *VerificationResul
 // Save verification result to JSON file
 func saveVerificationResult(result *VerificationResult) error {
 	timestamp := result.VerificationDate.Format("20060102_150405")
-	filename := fmt.Sprintf("verification_%s_%s.json", 
-		strings.ReplaceAll(result.URLDomain, ".", "_"), 
+	filename := fmt.Sprintf("verification_%s_%s.json",
+		strings.ReplaceAll(result.URLDomain, ".", "_"),
 		timestamp)
 
 	reportJSON, err := json.MarshalIndent(result, "", "  ")
@@ -1004,14 +1165,6 @@ func saveVerificationResult(result *VerificationResult) error {
 	return nil
 }
 
-// Helper function for min
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Remote Merkle Tree Integrity Verifier - STRICT MODE")
@@ -1023,23 +1176,26 @@ func main() {
 		fmt.Println("• No domain migration allowed")
 		fmt.Println("• Content copying between domains = THEFT")
 		fmt.Println("• Verification fails on domain mismatch")
+		fmt.Println("• Only .well-known/yubicrypt/ is verified from .well-known/")
 		fmt.Println()
 		fmt.Println("Usage:")
-		fmt.Println("  mfvc <server-url> [--dns] [--save] [--download] [--tor]")
+		fmt.Println("  mfvc <server-url> [--dns] [--save] [--download] [--yubicrypt] [--tor]")
 		fmt.Println()
 		fmt.Println("Arguments:")
 		fmt.Println("  <server-url>    URL of the server to verify")
 		fmt.Println("  --dns           Also verify against DNS TXT records")
 		fmt.Println("  --save          Save detailed JSON report (even if failed)")
 		fmt.Println("  --download      Download proof files (works even if verification fails)")
+		fmt.Println("  --yubicrypt     Download yubicrypt certificate files (.crt and .ots)")
 		fmt.Println("  --tor           Use Tor proxy (SOCKS5 127.0.0.1:9050)")
 		fmt.Println()
 		fmt.Println("Examples:")
 		fmt.Println("  mfvc https://example.com")
 		fmt.Println("  mfvc https://example.com --dns --tor")
-		fmt.Println("  mfvc https://example.com --download --tor")
+		fmt.Println("  mfvc https://example.com --download --yubicrypt")
+		fmt.Println("  mfvc https://example.com --download --yubicrypt --tor")
 		fmt.Println("  mfvc http://example.onion --tor")
-		fmt.Println("  mfvc https://suspicious-site.com --download --tor")
+		fmt.Println("  mfvc https://suspicious-site.com --download --yubicrypt")
 		os.Exit(1)
 	}
 
@@ -1047,6 +1203,7 @@ func main() {
 	useDNS := false
 	saveReport := false
 	downloadProofsFlag := false
+	downloadyubicryptFlag := false
 	useTor := false
 
 	for i := 2; i < len(os.Args); i++ {
@@ -1057,6 +1214,8 @@ func main() {
 			saveReport = true
 		case "--download":
 			downloadProofsFlag = true
+		case "--yubicrypt":
+			downloadyubicryptFlag = true
 		case "--tor":
 			useTor = true
 		default:
@@ -1064,17 +1223,15 @@ func main() {
 		}
 	}
 
-	// Warn if using Tor with non-onion address
 	if useTor && !strings.Contains(serverURL, ".onion") {
 		fmt.Printf("    Note: Using Tor with clearnet address\n")
 		fmt.Printf("   All traffic (HTTP and DNS) will go through Tor network.\n")
 	}
-	
-	// Check if Tor is running when --tor is specified
+
 	if useTor {
 		conn, err := net.DialTimeout("tcp", TorProxy, 2*time.Second)
 		if err != nil {
-			fmt.Printf("    Warning: Cannot connect to Tor proxy at %s\n", TorProxy)
+			fmt.Printf("   Warning: Cannot connect to Tor proxy at %s\n", TorProxy)
 			fmt.Printf("   Make sure Tor is running: sudo systemctl start tor\n")
 			fmt.Printf("   Or install Tor: sudo apt-get install tor\n")
 			os.Exit(1)
@@ -1087,14 +1244,14 @@ func main() {
 	}
 
 	if downloadProofsFlag {
-		downloadProofs(serverURL, useTor)
-		
-		// Only ask if ONLY --download was specified (no other verification params)
+		// Download proof files and optionally yubicrypt certificates
+		downloadProofs(serverURL, useTor, downloadyubicryptFlag)
+
 		if !useDNS && !saveReport {
 			fmt.Print("\nDo you want to continue with verification? (y/n): ")
 			var response string
 			fmt.Scanln(&response)
-			
+
 			if strings.ToLower(response) == "y" || strings.ToLower(response) == "yes" {
 				fmt.Println("\n" + strings.Repeat("=", 70))
 				fmt.Println("CONTINUING WITH STRICT VERIFICATION AFTER DOWNLOAD")
@@ -1109,13 +1266,12 @@ func main() {
 				}
 
 				if !result.Success {
-					fmt.Println("\nVerification failed, but proof files were downloaded.")
+					fmt.Println("\nVerification failed, but files were downloaded.")
 				}
 			} else {
 				fmt.Println("Download completed. Verification skipped.")
 			}
 		} else {
-			// User specified --dns and/or --save with --download, so auto-continue
 			fmt.Println("\n" + strings.Repeat("=", 70))
 			fmt.Println("CONTINUING WITH VERIFICATION (--dns/--save specified)")
 			fmt.Println(strings.Repeat("=", 70))
@@ -1129,7 +1285,7 @@ func main() {
 			}
 
 			if !result.Success {
-				fmt.Println("\nVerification failed, but proof files were downloaded.")
+				fmt.Println("\nVerification failed, but files were downloaded.")
 			}
 		}
 		return
