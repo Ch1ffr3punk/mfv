@@ -48,85 +48,153 @@ or compliance requirements.
 
 ## A session output of the mfvc CLI client:
 ```
-C:\Users\xxxxxxxxxxxx\Desktop>mfvc oc2mx.net --dns
-Starting remote verification of: https://oc2mx.net
-Domain for DNS lookup: oc2mx.net
+C:\Users\xxxxxxxxxx\Desktop>mfvc oc2mx.net --dns --yubicrypt --download --save
+======================================================================
+DOWNLOADING PROOF FILES (Mode: normal)
+======================================================================
+Server URL: https://oc2mx.net
+
+Trying: https://oc2mx.net/.well-known/mfv/merkle_metadata.json ... ✓
+Trying: https://oc2mx.net/.well-known/mfv/merkle_metadata.json.ots ... ✓
+Trying: https://oc2mx.net/.well-known/mfv/dns.txt ... ✓
+Trying: https://oc2mx.net/.well-known/mfv/dns.txt.ots ... ✓
+----------------------------------------------------------------------
+Proof Files Summary:
+  Mode:             normal
+  Files downloaded: 4
+  Total size:       4.5 KiB
+  Downloaded files:
+    • merkle_metadata.json
+    • merkle_metadata.json.ots
+    • dns.txt
+    • dns.txt.ots
+
+======================================================================
+DOWNLOADING yubicrypt CERTIFICATES
+======================================================================
+Downloading yubicrypt: .well-known/yubicrypt/ch1ffr3punk.crt ... ✓
+Downloading yubicrypt: .well-known/yubicrypt/ch1ffr3punk.crt.ots ... ✓
+
+yubicrypt Download Summary:
+  Files downloaded: 2
+  Total size:       1.8 KiB
+  Downloaded files:
+    • .well-known/yubicrypt/ch1ffr3punk.crt
+    • .well-known/yubicrypt/ch1ffr3punk.crt.ots
+
+  yubicrypt files downloaded: 2
+
+======================================================================
+CONTINUING WITH VERIFICATION (--dns/--save specified)
+======================================================================
+Starting STRICT verification of: https://oc2mx.net (Mode: normal)
+URL Domain: oc2mx.net
+STRICT MODE: No domain migration allowed
+SECURITY NOTE: Only .well-known/yubicrypt/ is verified from .well-known/
+               All other .well-known/ contents are excluded for security
 ----------------------------------------------------------------------
 Querying DNS for Merkle hash...
-DNS hash found: 0d84c30c710d662d76b7c80269378df10702aa1d
+DNS hash found: 6f8c047a4cfd27a6e927dee653f99eb304a4d3cf
 
 Fetching metadata from server...
-Metadata found. Created: 2025-12-04 19:46:34 UTC (Unix: 1764877594)
-Original file count: 8 (included)
-Excluded files: 2 (e.g., .well-known/acme-challenge/test.txt, .well-known/test.txt)
+Metadata found.          Created: 2026-04-03 18:40:10 UTC (Unix ET: 1775241610)
+Original file count:     13 (included)
+Metadata domain:         oc2mx.net
+Excluded files:          4
 
 Collecting current files from server...
+
+======================================================================
+yubicrypt CERTIFICATE VERIFICATION
+======================================================================
+1 yubicrypt certificate(s) found with respective .ots file(s)
+
+RIPEMD-160 hashes:
+  1. bf828af51027ea9c740adba0406ab93d5c42fc95 (.well-known/yubicrypt/ch1ffr3punk.crt)
+======================================================================
 Calculating hashes and Merkle root...
-======================================================================
-REMOTE MERKLE TREE VERIFICATION RESULT
-======================================================================
-Server URL:       https://oc2mx.net
-Verification Date: 2025-12-04 21:39:22 UTC (Unix: 1764884362)
-Domain:           oc2mx.net
-Excluded Files:   2 (e.g., .well-known/, .git/)
 
-STATUS: Folder is UNCHANGED. All included files are identical.
-NOTE: 2 files were excluded from verification (.well-known/, .git/, etc.)
+Performing STRICT hash verification...
+======================================================================
+VERIFICATION SUCCESSFUL
+======================================================================
+Server URL:        https://oc2mx.net
+Verification Date: 2026-04-04 08:55:10 UTC (Unix ET: 1775292910)
+URL Domain:        oc2mx.net
+Metadata Domain:   oc2mx.net
+Excluded Files:    4
 
-COMPARISON RESULTS:
+STATUS: All files unchanged and domain binding correct.
+NOTE: 4 files excluded from verification (including most .well-known/)
+
+DOMAIN VERIFICATION (STRICT MODE):
 ----------------------------------------------------------------------
-  Original Root Hash:    0d84c30c710d662d76b7c80269378df10702aa1d
-  Calculated Root Hash:  0d84c30c710d662d76b7c80269378df10702aa1d
-  Root Hash Match:       true
-  Metadata Created:      2025-12-04 19:46:34 UTC (Unix: 1764877594)
-  Original File Count:   8 (included)
-  Current File Count:    8 (included)
-  Excluded Paths:        2 (not verified)
-    - .well-known/acme-challenge/test.txt
-    - .well-known/test.txt
-  Original Total Size:   22.1 KiB (included files)
-  Current Total Size:    22.1 KiB (included files)
+  URL Domain:             oc2mx.net
+  Metadata Domain:        oc2mx.net
+  Domain Match:           Perfect
+
+HASH VERIFICATION:
+----------------------------------------------------------------------
+  Original Root Hash:     6f8c047a4cfd27a6e927dee653f99eb304a4d3cf
+  Calculated Merkle Root: 8ef4fda05034359846b1c0a712de05fe21e44d1d
+  Calculated Final Hash:  6f8c047a4cfd27a6e927dee653f99eb304a4d3cf (with domain: oc2mx.net)
+  Root Hash Match:        true
+  Metadata Created:       2026-04-03 18:40:10 UTC (Unix ET: 1775241610)
+  Original File Count:    13 (included)
+  Current File Count:     13 (included)
+  Excluded Paths:         4 (not verified)
+  Original Total Size:    25.8 KiB
+  Current Total Size:     25.8 KiB
 
 DNS VERIFICATION:
 ----------------------------------------------------------------------
-  DNS Hash:             0d84c30c710d662d76b7c80269378df10702aa1d
-  DNS Source:           dns
-  DNS Query Time:       2025-12-04 21:39:22 UTC (Unix: 1764884362)
-  DNS Hash Valid:       true
-  DNS Hash Match:       true
+  DNS Hash:               6f8c047a4cfd27a6e927dee653f99eb304a4d3cf
+  DNS Source:             dns
+  DNS Query Time:         2026-04-04 08:55:10 UTC (Unix ET: 1775292910)
+  DNS Hash Valid:         true
+  DNS Hash Match:         true
 
-UNCHANGED FILES: 8 files (included)
-  - ae.html
-  - index.html
-  - index.html.bak
-  - me.ico
-  - nt.html
-  - oc.html
-  - redball.gif
-  - about.html
+UNCHANGED FILES: 13 files
 ======================================================================
+  FINAL VERDICT: VERIFICATION SUCCESSFUL
+  All files are intact and domain binding is correct.
+  yubicrypt certificates are included in the integrity check.
+======================================================================
+
+Detailed verification report saved to: verification_oc2mx_net_20260404_085510.json
+
+C:\Users\xxxxxxxxxx\Desktop>
+
 ```
 ## opentimestamps.org proof:
 ```
-merkle_metadata.json.ots 479 B
-Stamped SHA256 hash: c7e2a9b7c17e1466e53734c8f5089657bebaf7082e73c995b2ab1cf2f0b0c925
+ch1ffr3punk.crt.ots 584 B
+Stamped SHA256 hash: ef0519befb13e24074c1ed6ef9881e63cb8386a94fc98c97b74de9b1b9b89cea
 
-merkle_metadata.json 2.0 kB
-SHA256: c7e2a9b7c17e1466e53734c8f5089657bebaf7082e73c995b2ab1cf2f0b0c925
+ch1ffr3punk.crt 1.3 kB
+SHA256: ef0519befb13e24074c1ed6ef9881e63cb8386a94fc98c97b74de9b1b9b89cea
 
 SUCCESS!
 
-Bitcoin block 926445 attests existence as of 2025-12-04 CET
+merkle_metadata.json.ots 700 B
+Stamped SHA256 hash: 1701c24d0d84581a811f50d21188e327ca6000eab948d0af976f8d7645770610
 
-dns.txt.ots 514 B
-Stamped SHA256 hash: a115060e1295b1eb5592487ad74db801b7737610c263b4e271217b82b8bd7b27
+merkle_metadata.json 3.2 kB
+SHA256: 1701c24d0d84581a811f50d21188e327ca6000eab948d0af976f8d7645770610
+
+SUCCESS!
+
+Bitcoin block 943540 attests existence as of 2026-04-03 CET
+
+dns.txt.ots 595 B
+Stamped SHA256 hash: cb1d69ccc812f269401cb1a441bc6901b0aa2e0ed1a358c179783fb2a52fd26d
 
 dns.txt 81 B
-SHA256: a115060e1295b1eb5592487ad74db801b7737610c263b4e271217b82b8bd7b27
+SHA256: cb1d69ccc812f269401cb1a441bc6901b0aa2e0ed1a358c179783fb2a52fd26d
 
 SUCCESS!
 
-Bitcoin block 926445 attests existence as of 2025-12-04 CET
+Bitcoin block 943540 attests existence as of 2026-04-03 CET
 ```
 
 If you like mfv consider a small donation in crypto currencies
